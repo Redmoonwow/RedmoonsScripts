@@ -456,8 +456,12 @@ Utils.GetPositionXZY(...)   // 座標の XZY 変換
 Utils.BrotliCompress / BrotliDecompress   // エクスポート文字列の圧縮・展開
 ```
 
-### `Splatoon.Memory.Camera`
+### カメラ角度は Splatoon からは取れない
 
-```csharp
-Camera.GetRadianX()   // カメラの水平角。画面基準の方向表示に使う
-```
+`Splatoon.Memory.Camera` は `internal` なのでスクリプトからは見えない
+(`InternalsVisibleTo` は設定されていない)。公式スクリプトはシグネチャスキャンで
+自前の `Camera` クラスを各スクリプト内に定義している
+(`SplatoonScripts/Generic/ForceSetDirection.cs` が実例)。
+画面基準の方向表示が要るなら `Svc.GameGui.WorldToScreen` で十分なことが多い。
+
+詳細は [ffxiv-coordinates](../../ffxiv-coordinates/SKILL.md) スキルを参照。

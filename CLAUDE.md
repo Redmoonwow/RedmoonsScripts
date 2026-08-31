@@ -25,7 +25,10 @@ RedmoonsScripts/            スクリプト本体 (公式の SplatoonScripts/ �
 Splatoon/                   submodule: PunishXIV/Splatoon (本体 + ネストした submodule 8 個)
 tools/gen_update_csv.py     update.csv 生成 (公式 ScriptUpdateFileGenerator の移植)
 .github/workflows/          RedmoonsScripts/** への push で update.csv を再生成
-.claude/skills/splatoon-script/   スクリプト開発用スキル (API リファレンス込み)
+.claude/skills/
+├─ splatoon-script/         スクリプト開発の中心 (API リファレンス込み)
+├─ ffxiv-coordinates/       座標系・角度・方向の扱い
+└─ splatoon-gui/            設定 UI とオーバーレイの実装
 ```
 
 ## ビルド
@@ -45,6 +48,9 @@ dotnet build RedmoonsScripts/RedmoonsScripts.csproj
 **`splatoon-script` スキルを使う。** `.claude/skills/splatoon-script/` に
 SplatoonScript の全 override、Controller / Element / Layout / Priority API、ECommons ヘルパ、
 FFXIVClientStructs の構造体アクセス、公式 340 スクリプトから抽出したイディオムがまとまっている。
+
+座標・角度・方向の計算が絡むなら **`ffxiv-coordinates`**、設定 UI やオーバーレイを触るなら
+**`splatoon-gui`** も併せて読む。
 
 一次資料は `Splatoon/` submodule のソース。特に:
 
