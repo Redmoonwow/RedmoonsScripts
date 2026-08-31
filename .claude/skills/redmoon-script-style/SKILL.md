@@ -1,6 +1,6 @@
 ---
 name: redmoon-script-style
-description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・テンプレート・自作 API)。固定 8 人パーティ前提のジョブ→スロット割り当て、State enum による状態機械、OnSetup で最小 Element を登録し ApplyElement で実行時に配置する方式、DirectionCalculator / ClockDirectionCalculator を核にした 8 方向・時計方向の抽象、#region の固定テンプレート、Debug 専用の OnSettingsDraw、リプレイ安全な自動化 (vnav / pdrspeed / Arm's Length)。本人のスクリプトを新規に書く・既存を直す・レビューするときに使う。
+description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・テンプレート・自作 API)。固定 8 人パーティ前提のジョブ→スロット割り当てと、8 人全員分を解決してから自分の分だけ描く設計、State enum による状態機械、OnSetup で最小 Element を登録し ApplyElement で実行時に配置する方式、DirectionCalculator / ClockDirectionCalculator を核にした 8 方向・時計方向の抽象、#region の固定テンプレート、Debug 専用の OnSettingsDraw、リプレイ安全な自動化 (vnav / pdrspeed / Arm's Length)。本人のスクリプトを新規に書く・既存を直す・レビューするときに使う。
 ---
 
 # Redmoon 流スクリプト作法
@@ -24,6 +24,7 @@ description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・�
 | 方向の抽象 | `DirectionCalculator` **551 回** | `MathHelper` を直接 |
 | 自機 | `Player.Object` **30 回** / `BasePlayer` **0 回** | `BasePlayer` |
 | 誰が誰か | `SetListEntityIdByJob()` でジョブ→固定 index | `PriorityData` (使用 0 回) |
+| 解決の範囲 | **8 人全員分を解決**してから自分の分だけ描く | 自分の分だけ解決する |
 | 進行管理 | `State` enum + `_state = State.X` **71 回** | 素朴なフラグ |
 | クリーンアップ | `HideAllElements()` **72 回** | `Controller.Hide()` |
 | 設定画面 | ほぼ Debug パネルのみ (11/12) | ユーザ向けオプション |
@@ -230,6 +231,73 @@ private PartyData? GetMinedata() => _partyDataList.Find(x => x.Mine);
   は全部 `PartyData` に生やす。**状態を 1 箇所 (`_partyDataList`) に集約する。**
 
 呼び出しは「ギミック開始の詠唱を拾った瞬間」に `SetListEntityIdByJob()` を実行して作り直す。
+
+### 8 人全員分を解決してから、自分の分だけ描く
+
+**これが他の書き手との一番大きな違い。** 表示に必要なのは自分の担当だけなのに、
+ギミックの割り当ては必ず 8 人全員について解く。理由は 3 つ。
+
+1. **整合性を検証できる。** 全員解けているかを数で確かめられるので、読み違えたまま
+   間違った指示を出さずに済む。
+2. **デバッグできる。** Debug テーブルに 8 人分が並ぶので、自分の表示が出ない/おかしいときに
+   「誰の解決で崩れたか」がその場で分かる。録画を再生しながら他人の行に着目できる。
+3. **表示先を差し替えられる。** 「自分」を別の誰かに切り替えれば、他人視点の検証がそのまま通る
+   (実際、`_partyDataList.Each(x => x.Mine = false); _partyDataList[6].Mine = true;` を
+   コメントアウトで残してあるファイルがある)。
+
+書き方は「解決」と「描画」を分けるだけ。
+
+```csharp
+// 解決: 8 人全員の TowerDirection / IsStack / TetherPairId2 … を埋める。bool で成否を返す
+private bool ParseTether()
+{
+    foreach(var pc in _partyDataList)          // 全員をなめる
+    {
+        if(pc.TetherPairId1 == 0) continue;
+        var pair2 = _partyDataList.Find(x => x.TetherPairId1 == pc.EntityId);
+        if(pair2 == null) continue;
+        pc.TetherPairId2 = pair2.EntityId;
+    }
+
+    foreach(var pc in FakeParty.Get().Where(x => x.StatusList.Any(y => y.StatusId == 2461)))
+        _partyDataList.Find(x => x.EntityId == pc.EntityId)!.IsStack = true;
+
+    // 全員分あるからこそ書ける整合性チェック
+    if(_partyDataList.Where(x => x.IsStack).Count() != 2) return false;
+    if(_partyDataList.Where(x => x.TetherPairId1 != 0 && x.TetherPairId2 != 0).Count() != 4) return false;
+
+    // 線付きヒラは北確定 → つながっている 2 人は南 → 残りを埋める …
+    return true;
+}
+
+// 呼ぶ側: 解決できたときだけ状態を進める
+if(ParseTether()) { ShowTowerStateGuide(); _state = State.tower; }
+else              { _state = State.None; }
+
+// 描画: ここで初めて自分に絞る
+private void ShowTowerStateGuide()
+{
+    var pc = GetMinedata();
+    if(pc == null) return;
+    ApplyElement("Bait", pc.TowerDirection, 10);
+}
+```
+
+- 解決メソッドは `Parse***` で **`bool` を返す** (`ParseTether`, `ParseDebuff`)。
+  途中で辻褄が合わなければ `return false;` (12 本で計 41 箇所)。
+- 数による検証がそのまま安全弁になる。実際に書かれているもの:
+
+  ```csharp
+  _partyDataList.Where(x => x.TowerDirection != Direction.None).Count() != 8   // 全員解けたか
+  _partyDataList.Where(x => x.Mine).ToList().Count != 1                        // 自分は 1 人か
+  _partyDataList.Where(x => x.IsStack).Count() != 2                            // 頭割りは 2 人か
+  _partyDataList.Where(x => x.TetherPairId1 != 0 && x.TetherPairId2 != 0).Count() != 6
+  ```
+  外れたら `ExceptionReturn("...")` でログに残して抜ける。**黙って描かない。**
+- 描画側 (`Show***`) の 1 行目はほぼ必ず `var pc = GetMinedata(); if(pc == null) return;`。
+  **絞り込みは描画の入口 1 箇所だけ**にして、解決ロジックには `Mine` を持ち込まない。
+- 解決結果は必ず `PartyData` のフィールドに書く。ローカル変数で済ませない
+  (Debug テーブルに出せなくなるため)。
 
 ---
 
@@ -510,6 +578,8 @@ public override void OnSettingsDraw()
 ```
 
 **`PartyData` にフィールドを足したら Debug テーブルにも足す**、が習慣になっている。
+このテーブルが 8 人分そろっていることが、§4 で全員分を解決している理由そのもの
+(自分の表示が出ないとき、誰の解決で崩れたかがこの表で分かる)。
 
 ---
 
@@ -570,8 +640,10 @@ if(myHourGlass == null) { ExceptionReturn("myHourGlass is null"); return; }
 6. `OnSetup` で必要な Element を最小構成で登録 (`Bait` / `BaitObject` / `Circle{i}` が定番)
 7. `OnStartingCast` で開始詠唱 → `SetListEntityIdByJob()` → 表示 → `_state` 更新
 8. `OnActionEffectEvent` で着弾 → `HideAllElements()` → 次の状態、終了 ID で `OnReset()`
-9. `Show***` を private methods に書く。位置指定は必ず `ApplyElement`
-10. `OnSettingsDraw` の Debug テーブルに新しいフィールドを追加
-11. 自動化を入れるなら `DutyRecorderPlayback` 分岐を必ず付ける
-12. `dotnet build RedmoonsScripts/RedmoonsScripts.csproj` で型チェック
-13. duty recorder の録画で再生検証 → `Metadata` のバージョンを上げて push
+9. 割り当ては `Parse***` で **8 人全員分**を解いて `bool` を返す。件数で整合性を検証し、
+    合わなければ `ExceptionReturn` して `return false`
+10. `Show***` を private methods に書く。1 行目は `GetMinedata()`、位置指定は必ず `ApplyElement`
+11. `OnSettingsDraw` の Debug テーブルに新しいフィールドを追加
+12. 自動化を入れるなら `DutyRecorderPlayback` 分岐を必ず付ける
+13. `dotnet build RedmoonsScripts/RedmoonsScripts.csproj` で型チェック
+14. duty recorder の録画で再生検証 → `Metadata` のバージョンを上げて push
