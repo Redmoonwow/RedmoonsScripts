@@ -1,0 +1,36 @@
+name: Generate script update data
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - RedmoonsScripts/**
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  generate_updatefile:
+    if: ${{ github.repository == 'Redmoonwow/RedmoonsScripts' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Generate update.csv
+        run: python3 tools/gen_update_csv.py RedmoonsScripts RedmoonsScripts/update.csv
+
+      - name: Commit file
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add RedmoonsScripts/update.csv
+          git commit -m "Update RedmoonsScripts/update.csv" || echo "No changes to commit"
+          git push
