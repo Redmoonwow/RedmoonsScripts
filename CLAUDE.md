@@ -28,7 +28,8 @@ tools/gen_update_csv.py     update.csv 生成 (公式 ScriptUpdateFileGenerator 
 .claude/skills/
 ├─ splatoon-script/         スクリプト開発の中心 (API リファレンス込み)
 ├─ ffxiv-coordinates/       座標系・角度・方向の扱い
-└─ splatoon-gui/            設定 UI とオーバーレイの実装
+├─ splatoon-gui/            設定 UI とオーバーレイの実装
+└─ redmoon-script-style/    自分の書き方 (テンプレート・自作 API・作法)
 ```
 
 ## ビルド
@@ -51,6 +52,10 @@ FFXIVClientStructs の構造体アクセス、公式 340 スクリプトから�
 
 座標・角度・方向の計算が絡むなら **`ffxiv-coordinates`**、設定 UI やオーバーレイを触るなら
 **`splatoon-gui`** も併せて読む。
+
+自分のスクリプトを新しく書く / 既存を直すときは **`redmoon-script-style`** を必ず読む。
+`#region` テンプレート、固定 8 人パーティ前提の設計、`DirectionCalculator` 一式、
+`ApplyElement` による表示、リプレイ安全な自動化まで、実際のコードから起こした作法が入っている。
 
 一次資料は `Splatoon/` submodule のソース。特に:
 

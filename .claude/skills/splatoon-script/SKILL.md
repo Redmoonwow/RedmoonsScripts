@@ -18,6 +18,7 @@ description: Splatoon (FFXIV Dalamud プラグイン) のスクリプトを書�
 | 公式 340 スクリプトから抽出した頻出パターン・レシピ | [references/idioms.md](references/idioms.md) |
 | 座標・角度・方向の計算、マップ座標、スクリーン投影 | `ffxiv-coordinates` スキル |
 | 設定 UI、オーバーレイ、色、ImGui の作法 | `splatoon-gui` スキル |
+| 自分 (Redmoon) の書き方に揃える・既存を直す | `redmoon-script-style` スキル |
 
 実装の一次資料は `Splatoon/` submodule のソースそのもの。迷ったら
 `Splatoon/Splatoon/SplatoonScripting/` と `Splatoon/ECommons/ECommons/` を直接読む。
