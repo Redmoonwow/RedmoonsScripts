@@ -1,6 +1,6 @@
 ---
 name: redmoon-script-style
-description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・テンプレート・自作 API)。固定 8 人パーティ前提のジョブ→スロット割り当てと、8 人全員分を解決してから自分の分だけ描く設計、State enum による状態機械、OnSetup で最小 Element を登録し ApplyElement で実行時に配置する方式、DirectionCalculator / ClockDirectionCalculator を核にした 8 方向・時計方向の抽象、#region の固定テンプレート、Debug 専用の OnSettingsDraw、リプレイ安全な自動化 (vnav / pdrspeed / Arm's Length)。本人のスクリプトを新規に書く・既存を直す・レビューするときに使う。
+description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・テンプレート・自作 API)。判断基準は一貫して「目で検証できるか」で、必要以上の分割はしない (上限およそ 100 行) / .NET 規約は既定で守り検証しづらくなる場合のみ逸脱する (#region がその例)。固定 8 人パーティ前提のジョブ→スロット割り当てと、8 人全員分を解決してから自分の分だけ描く設計、State enum による状態機械、OnSetup で最小 Element を登録し ApplyElement で実行時に配置する方式、DirectionCalculator / ClockDirectionCalculator を核にした 8 方向・時計方向の抽象、#region の固定テンプレート、Debug 専用の OnSettingsDraw、リプレイ安全な自動化 (vnav / pdrspeed / Arm's Length)。本人のスクリプトを新規に書く・既存を直す・レビューするときに使う。
 ---
 
 # Redmoon 流スクリプト作法
@@ -35,7 +35,7 @@ description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・�
 | 進行管理 | `State` enum + `_state = State.X` **71 回** | 素朴なフラグ |
 | クリーンアップ | `HideAllElements()` **72 回** | `Controller.Hide()` |
 | 設定画面 | ほぼ Debug パネルのみ (11/12) | ユーザ向けオプション |
-| 例外処理 | `catch` **0 回**。ガード節 + `ExceptionReturn()` | try/catch |
+| 例外処理 | スクリプトでは `catch` **0 回** (ガード節 + `ExceptionReturn()`)。プラグイン中核では書く | try/catch |
 | ログ | `DuoLog` 56 / `PluginLog` 20 | `PluginLog` 中心 |
 | 自動化 | `Chat.Instance.ExecuteCommand` **64 回** (`/vnav`, `/pdrspeed`, `/mk off`) | 表示のみ |
 
@@ -592,7 +592,20 @@ public override void OnSettingsDraw()
 
 ## 11. エラー処理とログ
 
-- **`try`/`catch` は 1 つも書かない (0 回)。** ガード節で早期 return する。
+- **スクリプトでは `try`/`catch` を書かない (12 本で 0 回)。** ガード節で早期 return する。
+  これは「例外を扱わない」ではなく **文脈による使い分け**。同じ作者がプラグイン中核
+  (`Splatoon/Splatoon/Memory/BuffEffectProcessor.cs`) では 2 箇所で捕まえており、しかも
+  どちらも意味のある処理をしている:
+
+  ```csharp
+  catch(Exception ex) { DuoLog.Error(...); _IsRunning = false; }              // 確保失敗 → 機能を諦める
+  catch(Exception ex) { DuoLog.Error(...); Dispose(); _IsRunning = false; }   // 実行時失敗 → 解放して恒久停止
+  ```
+
+  毎フレーム走るループが例外を出し続けたらログを埋めるので、**一度死んだら二度と走らせない**
+  キルスイッチにしている。判断基準は「その場で回復できるか」ではなく
+  **「失敗が繰り返されると害になるか」**。スクリプトは失敗しても次のイベントで作り直せるので
+  握らない。中核は握って止める。
 - 「起きてはいけない」状況は 1 行にまとめて記録して抜ける:
 
 ```csharp
@@ -605,7 +618,56 @@ if(myHourGlass == null) { ExceptionReturn("myHourGlass is null"); return; }
 
 ---
 
-## 12. 書式
+## 12. 分割方針 — 検証可読性が判断基準
+
+**読むこと = 目で検証すること**。だから、検証に必要な材料が同じ画面に揃っているかで
+分割の是非を決める。「短いメソッドが良い」という一般論には従わない。
+
+### 上限はおよそ 100 行。それ以下なら分割しない
+
+一般的な C# の感覚（1 メソッド 10〜20 行）とは**意図的に違う**。
+
+```
+本人のコード     : 30 メソッド / 2292 行 / 平均 41 行 / 最大 153 行 / 呼び出し 3 段
+一般的な C# の書き方: 185 メソッド / 2688 行 / 平均 14 行 / 最大 57 行 / 呼び出し 12 段
+```
+
+> **必要以上の分割は検証可読性を下げる。**
+> 100 行以下に収まっているものを 183 個に割る必要はない。割った瞬間、検証対象が画面外に出る。
+
+### 分割してよいもの / いけないもの
+
+| | 例 | 扱い |
+|---|---|---|
+| **一本の物語** | `BuffEffectProcessor.Update()` (74 行)、`CommonUpdate()` (130 行)、`BlueBefore()` (75 行) | **分割しない**。途中で切ると時系列や手順が読めなくなる。100 行を超えても正しい |
+| **ディスパッチ** | `OnActionEffectEvent` の `castId` 羅列 (153 行) | 分けるほどでもないと判断した場合。長くても害が小さい |
+| **ドメイン知識** | ギミックの判定・座標計算・割り当て | **イベントハンドラに置かない。private メソッドに出す** |
+
+### イベントハンドラは薄く保つ
+
+`OnStartingCast` / `OnActionEffectEvent` / `OnTetherCreate` などの override が
+**大きなドメイン知識を抱えるのは避ける**。ハンドラの仕事は「拾って、振り分けて、状態を進める」まで。
+実際の判定と描画は `Parse***` / `Show***` に出す。
+
+```csharp
+public override void OnStartingCast(uint source, uint castId)
+{
+    if(castId == 40246)
+    {
+        SetListEntityIdByJob();      // 解決は private へ
+        HideAllElements();
+        ShowAkhRhaiReadyGuide(source); // 描画も private へ
+        _state = State.AkhRhai;       // ハンドラは状態を進めるだけ
+    }
+}
+```
+
+> 既存コードで 100 行を超えているハンドラは、**急ぎで書いたか、分けるほどでもないと判断したか**の
+> どちらか。設計として推奨される形ではないので、触るついでに private に出してよい。
+
+---
+
+## 13. 書式
 
 - **`if (` / `for (` / `foreach (` と空白を空けて書く。**
   リポジトリ上では `if(` が 1090 : 158 で多数派だが、これは本人の書き方ではない。
@@ -625,7 +687,47 @@ if(myHourGlass == null) { ExceptionReturn("myHourGlass is null"); return; }
 
 ---
 
-## 13. 公式規約との差分 (承知の上で外している点)
+## 14. .NET 規約への向き合い方
+
+**既定は MS 準拠。ただし検証しづらくなるなら逸脱する。**
+逸脱してよいのは、**規約に従うより高い可読性を実現できる確信があるとき**に限る。
+「面倒だから」は逸脱の理由にならない。
+
+### 前提: 「MS 規約」は 3 つの別物が混ざっている
+
+| 出所 | 何を規定するか | このリポジトリでの扱い |
+|---|---|---|
+| **Framework Design Guidelines** | **公開 API のみ** (型名・メンバ名・例外設計) | 従う。ただし private メンバには何も言っていない |
+| **dotnet/runtime coding style** | あのリポジトリ内部の取り決め (`_camelCase`、private static は `s_`) | 従う |
+| **StyleCop.Analyzers** | サードパーティの意見 (SA1124 = region 禁止 など) | **採用しない** |
+
+> よくある誤解: 「MS 規約は `#region` を禁止している」「メソッドは短くしろと決まっている」
+> — **どちらも MS の規約ではない**。前者は StyleCop、後者は業界の通念。
+> .NET SDK の既定アナライザにも該当規則は無い。§12 の方針は MS 規約に違反していない。
+
+### 確信を持って逸脱しているもの
+
+**`#region` + バナーコメント** — StyleCop は禁じるが、こちらは目次として機能させる。
+1 ファイル 2000 行超が常態で、region の並びが 8 本すべてで固定されているため、
+**別のファイルでも同じ位置を見れば同じものがある**。この予測可能性は region 無しでは作れない。
+逸脱の対価として、順序を崩さないことを守る。
+
+### 規約に寄せるもの
+
+| 箇所 | 現状 | 直す形 | 理由 |
+|---|---|---|---|
+| 定数名 | `MAX_STATUS_NUM` | `MaxStatusNum` | FDG の実規則。検証上の利点は無い |
+| private static | `_CharacterStatusInfoPtr` | `s_characterStatusInfoPtr` | **静的か否かが一目で分かる**。寿命とリセットの正しさを目視で確かめるとき効く |
+| private インスタンス | `_StateProcEnd` | `_stateProcEnd` | 表記揺れを消すだけ |
+| キャスト | `(IPlayerCharacter)x` | `if(x is IPlayerCharacter pc)` | 落ちない。検証上も分岐が明示される |
+| `Metadata` の override | `Metadata?` | `Metadata` | 基底は非 null。CS8764 が消える |
+
+`s_` は特に、`BuffEffectProcessor` が **インスタンスクラスなのに静的フィールドを持っている**
+(2 個目のインスタンスが生まれると解放済みメモリを触る) という危険を、命名だけで見えるようにする。
+
+---
+
+## 15. 公式スクリプトとして出す場合の差分
 
 新規に書くときも既存に合わせるなら、以下はそのままでよい。公式 (PunishXIV) に PR で出す
 ときだけ問題になる。
@@ -644,7 +746,7 @@ if(myHourGlass == null) { ExceptionReturn("myHourGlass is null"); return; }
 
 ---
 
-## 14. 新規スクリプトを書くときの手順
+## 16. 新規スクリプトを書くときの手順
 
 1. `P4 Darklit  Full Toolers.cs` か `P5 Fulgent Blade Full Toolers.cs` を雛形として複製する
    (region 構成が完成形で、かつ大きすぎない)
