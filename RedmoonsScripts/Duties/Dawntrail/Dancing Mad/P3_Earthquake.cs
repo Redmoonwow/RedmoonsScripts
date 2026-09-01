@@ -73,57 +73,86 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* const                                                            */
     /********************************************************************/
-    private const uint TerritoryDancingMadUltimate = 1363;
-    private const uint KefkaDataId = 19451;
-    private const uint FinalDondokoDataId = 19504;
-    private const uint DecisiveBattleChaos = 49890;
-    private const uint DecisiveBattleExdeath = 49891;
-    private const uint BlackHoleDataId = 19512;
-    private const uint BlackHoleCast = 47867;
-    private const uint BlackHoleHit = 47868;
-    private const uint BintaStackCast = 47846;
-    private const uint BintaSpreadCast = 47847;
-    private const uint AsIsFirst = 47852;
-    private const uint AsIsSecond = 47853;
-    private const uint UltimateEmbrace = 49740;
-    private const uint BowelsOfAgony = 47858;
-    private const uint LateP3Blizzaga = 47887;
-    private const uint DondokoCast = 47855;
-    private const uint DondokoHit = 47856;
-    private const uint LandingCast = 47874;
-    private const uint FinalLandingSwitch = 47885;
-    private const uint TowerImpact = 47857;
-    private const uint Protrude = 47877;
-    private const uint TargetIconCommand = 34;
-    private const uint FinalStackMarker = 161;
-    private const ushort FirstTarget = 3004;
-    private const ushort SecondTarget = 3005;
-    private const ushort ThirdTarget = 3006;
-    private const ushort AccretionStatus = 1604;
-    private const ushort EarthStatus = 5454;
-    private const ushort LineDoneStatus = 5453;
+    // 上流は ID としきい値をすべて名前付き定数にしている。マジックナンバーは本文に無い。
+    // ---- territory / object -------------------------------------------------
+    private const uint TerritoryDancingMadUltimate = 1363;  // ValidTerritories
+    private const uint KefkaDataId = 19451;                 // IsKefkaAnchorObject: アンカー候補の絞り込み
+    private const uint FinalDondokoDataId = 19504;          // 未使用 (上流から持ち越し)
+    private const uint BlackHoleDataId = 19512;             // ブラックホール実体の判定。3 箇所で使用
+
+    // ---- 詠唱 ID (OnStartingCast で拾う。予告 = 表示のきっかけ) ----------------
+    private const uint DecisiveBattleChaos = 49890;   // フェーズ移行。ケフカのアンカー角オフセット決定にも使う
+    private const uint DecisiveBattleExdeath = 49891; // 同上 (もう一方のパターン)
+    private const uint BlackHoleCast = 47867;         // ブラックホール出現 -> StartBlackHole
+    private const uint UltimateEmbrace = 49740;       // 終盤突入の合図 (BowelsOfAgony と対)
+    private const uint BowelsOfAgony = 47858;         // 同上
+    private const uint LateP3Blizzaga = 47887;        // 終盤: 中央誘導 / ロール散開のきっかけ
+    private const uint DondokoCast = 47855;           // 着地予告 (LandingCast と対)
+    private const uint LandingCast = 47874;           // 着地予告。誘導の actionId としても使う
+    private const uint Protrude = 47877;              // 終盤: 散開して動き続ける指示
+
+    // ---- アクション ID (OnActionEffectEvent で拾う。着弾 = 消す / 次へ) --------
+    private const uint BlackHoleHit = 47868;          // 着弾位置から bucket を求めて AdvanceWindow
+    private const uint DondokoHit = 47856;            // 着地。ObserveFinalTowerSource で塔位置を記録
+    private const uint TowerImpact = 47857;           // 塔。同上
+    private const uint FinalLandingSwitch = 47885;    // 2 回目の着地へ切り替え
+
+    // ---- ケフカの向きから読む相対角 (TryGetKefkaAnchorOffset の switch) --------
+    private const uint BintaStackCast = 47846;        // -> +90 度
+    private const uint BintaSpreadCast = 47847;       // -> -90 度
+    private const uint AsIsFirst = 47852;             // ->   0 度 (正面)
+    private const uint AsIsSecond = 47853;            // -> 180 度 (背面)
+
+    // ---- ActorControl ---------------------------------------------------------
+    private const uint TargetIconCommand = 34;        // command == 34 が頭上アイコン設定
+    private const uint FinalStackMarker = 161;        // その p1。終盤の頭割りマーカー
+
+    // ---- ステータス ID --------------------------------------------------------
+    private const ushort FirstTarget = 3004;      // GroupFromStatus -> TargetGroup.Attack
+    private const ushort SecondTarget = 3005;     // GroupFromStatus -> TargetGroup.Bind
+    private const ushort ThirdTarget = 3006;      // GroupFromStatus -> TargetGroup.Stop
+    private const ushort AccretionStatus = 1604;  // 追加の割り当て情報。マーカー抑止の判定にも使う
+    private const ushort EarthStatus = 5454;      // 地震。付与人数のピークを _earthMaxCount に記録
+    private const ushort LineDoneStatus = 5453;   // 線取り済み。自分に付いたら当該ウィンドウ完了
+
+    // ---- ブラックホール判定のしきい値 -----------------------------------------
+    // TryBucket: 中心からの距離がこの範囲にある object だけをブラックホールとみなす
     private const float BlackHoleRadiusMin = 11.0f;
     private const float BlackHoleRadiusMax = 23.0f;
-    private const float KefkaAnchorRadiusMin = 5.0f;
-    private const float KefkaVirtualAnchorRadius = 20.0f;
-    private const float KefkaRotationMatchMax = MathF.PI / 4.0f;
+    // デバッグ表示の分母。実際の判定には使っていない
     private const int ExpectedBlackHoleActors = 12;
-    private const float BlackHoleGuideRadius = 9.021f;
-    private const float LastBlackHoleGuideRadius = 19.0f;
+
+    // ---- ケフカ位置の推定 (観測できないので幾何で当てにいく) --------------------
+    // IsKefkaAnchorPosition: 中心からこれ以上離れていればアンカーとみなす
+    private const float KefkaAnchorRadiusMin = 5.0f;
+    // 実体を取れないとき、角度だけから仮の位置を作るときの半径
+    private const float KefkaVirtualAnchorRadius = 20.0f;
+    // TryCaptureKefkaFromMatchingClone: 回転角がこの差以内なら「同一」とみなす。45 度は広い
+    private const float KefkaRotationMatchMax = MathF.PI / 4.0f;
+
+    // ---- 立ち位置の算出 -------------------------------------------------------
+    private const float BlackHoleGuideRadius = 9.021f;      // 通常ウィンドウの誘導半径
+    private const float LastBlackHoleGuideRadius = 19.0f;   // 最終ウィンドウ (_currentWindow == 9) のみ
+    // BlackHoleStandPosition: 候補がブラックホールにこれより近ければ、離れた点を総当たりで探す
     private const float BlackHoleAvoidRadius = 3.0f;
     private const float BlackHoleAvoidRadiusSq = BlackHoleAvoidRadius * BlackHoleAvoidRadius;
-    private const float BlackHoleAvoidMinRadius = 6.0f;
-    private const float BlackHoleAvoidInwardStep = 1.0f;
-    private const int BlackHoleAvoidInwardSteps = 6;
-    private const float BlackHoleAvoidAngleStep = MathF.PI / 24.0f;
-    private const int BlackHoleAvoidAngleSteps = 4;
-    private const float FinalPairRadius = 9.8f;
-    private const float FinalTowerRadius = 10.0f;
-    private const float FinalInitialSplitRadius = 5.5f;
+    private const float BlackHoleAvoidMinRadius = 6.0f;     // 内側に寄せる下限
+    private const float BlackHoleAvoidInwardStep = 1.0f;    // 半径方向の刻み
+    private const int BlackHoleAvoidInwardSteps = 6;        // 半径方向の試行回数
+    private const float BlackHoleAvoidAngleStep = MathF.PI / 24.0f;  // 角度方向の刻み (7.5 度)
+    private const int BlackHoleAvoidAngleSteps = 4;         // 角度方向の試行回数 (左右それぞれ)
+
+    // ---- 終盤の配置半径 -------------------------------------------------------
+    private const float FinalPairRadius = 9.8f;          // ロール別散開
+    private const float FinalTowerRadius = 10.0f;        // 塔
+    private const float FinalInitialSplitRadius = 5.5f;  // 初期のケフカ基準 N/S 分割
+
+    // ---- element 名 (OnSetup で登録し、以後この名前で引く) ---------------------
     private const string DestinationElement = "Destination";
     private const string InstructionElement = "Instruction";
     private const string BlackHoleLineElement = "BlackHoleLine";
-    private const float DefaultColorAlpha = 200.0f / 255.0f;
+
+    private const float DefaultColorAlpha = 200.0f / 255.0f;  // 設定の既定色に乗せる不透明度
 
     #endregion
 
@@ -131,6 +160,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* static tables                                                    */
     /********************************************************************/
+    // ウィンドウごとの bucket 表と、設定画面に出す多言語の説明文。
+    // どちらも起動時に 1 度作られ、以後変わらない。
     private static readonly Vector3 Center = new(100f, 0f, 100f);
     private static readonly Slot[][] BlackHoleWindowSlots =
     [
@@ -268,48 +299,70 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private fields                                                   */
     /********************************************************************/
+    // 実行時に変化する状態。すべてこの区画にあり、他所では宣言されない。
 
-    private readonly Dictionary<uint, TargetGroup> _groups = [];
-    private readonly Dictionary<int, uint> _tetherTargets = [];
-    private readonly Dictionary<int, Vector3> _tetherSources = [];
-    private readonly List<Vector3> _blackHolePositions = [];
-    private readonly int[] _fixedLaneSetBuckets = [-1, -1, -1];
-    private readonly HashSet<int> _hitSources = [];
-    private readonly HashSet<uint> _earthPlayers = [];
-    private readonly HashSet<uint> _accretionPlayers = [];
-    private readonly List<Vector3> _finalTowerPositions = [];
+    // 状態はどの Clear が戻すかで塊になっている。ResetAll から下記の順に呼ばれる:
+    //   ResetAll -> ClearMechanicState -> ClearFinalState
+    //                                  -> ClearSelfResolution / ClearSelfDisplayState
+    //                                  -> ClearGuide
+    //                                  -> ClearBlackHoleState
+    // フィールドを足したら、対応する Clear にも足すこと (型では守られていない)。
 
-    private State _state;
-    private uint _selfPlayerId;
-    private Slot _selfSlot;
-    private AssignmentQuality _quality;
-    private BlackHoleTask? _selfBlackHoleTask;
-    private Vector3? _guideDestination;
-    private GuidanceKind _guideKind;
-    private uint _guideActionId;
-    private string _guideText = "";
-    private string _guideInstruction = "";
-    private string _guideDebug = "";
-    private string _kefkaAnchorDebug = "";
-    private string _pendingMarkerCommand = "";
-    private long _markerCommandAtMs;
-    private bool _pendingTargetMarkerCommand;
-    private uint _kefkaId;
-    private Vector3? _kefkaPosition;
-    private int _currentWindow = -1;
-    private int _fixedLaneSetStartWindow = -1;
-    private int _selfCompletedWindow = -1;
-    private int _earthMaxCount;
-    private FinalStage _finalStage;
-    private FinalStackRole _firstFinalStackRole;
-    private FinalStackRole _secondFinalStackRole;
-    private FinalStackRole _currentFinalStackRole;
-    private int _landingCount;
-    private int _finalStackMarkerCount;
-    private int _finalDondokoHitCount;
-    private bool _sentMarkerCommand;
-    private bool _selfHadAccretionMarkerBlock;
-    private string _instruction = "";
+    // ---- ResetAll が直接戻す: 戦闘・ディレクタ単位で完全に初期化される ---------
+    private State _state;                       // 進行の主状態。Idle/Collecting/BlackHoleActive/Final/Completed
+    private uint _selfPlayerId;                 // 自機の EntityId。BasePlayer 差し替え検出に使う
+    private readonly Dictionary<uint, TargetGroup> _groups = [];  // EntityId -> 第1/第2/第3対象。デバフから構築
+    private bool _sentMarkerCommand;            // マーカー送信の一発ガード。二重送信を防ぐ
+    private string _pendingMarkerCommand = "";  // 送信待ちのコマンド文字列
+    private long _markerCommandAtMs;            // 送信予定時刻 (TickCount64)。0 なら予定なし
+    private bool _pendingTargetMarkerCommand;   // 送信待ちが「対象デバフ由来」かどうか
+
+    // ---- ClearMechanicState が戻す: ギミック 1 回分 ----------------------------
+    private readonly HashSet<uint> _earthPlayers = [];      // 地震デバフ保持者
+    private readonly HashSet<uint> _accretionPlayers = [];  // Accretion 保持者
+    private uint _kefkaId;                       // 確定したケフカの EntityId。0 = 未確定
+    private Vector3? _kefkaPosition;             // 確定したケフカ位置。角度推定で埋めることもある
+    private string _kefkaAnchorDebug = "";       // どう確定したかの記録 (Debug 表示用)
+    private int _earthMaxCount;                  // 地震デバフ保持者数のピーク
+    private int _currentWindow = -1;             // 現在のブラックホールウィンドウ 0..9。-1 = 未開始
+    private bool _selfHadAccretionMarkerBlock;   // Accretion によりマーカー送信を抑止したか
+
+    // ---- ClearFinalState が戻す: 終盤シーケンス --------------------------------
+    private FinalStage _finalStage;                    // 終盤の細分状態
+    private FinalStackRole _firstFinalStackRole;       // 1 回目の頭割りロール
+    private FinalStackRole _secondFinalStackRole;      // 2 回目の頭割りロール
+    private FinalStackRole _currentFinalStackRole;     // 現在参照しているロール
+    private int _landingCount;                         // 着地の回数
+    private int _finalStackMarkerCount;                // 頭割りマーカーの観測回数
+    private int _finalDondokoHitCount;                 // 着地アクションの観測回数
+    private readonly List<Vector3> _finalTowerPositions = [];  // 観測した塔の位置
+
+    // ---- ClearSelfResolution / ClearSelfDisplayState が戻す: 自分の解決結果 ----
+    private Slot _selfSlot;                      // 自分のスロット。None = 未解決
+    private AssignmentQuality _quality;          // どの根拠で解決したか (Marker/Priority/RoleAccretion)
+    private BlackHoleTask? _selfBlackHoleTask;   // 自分が取る線。bucket / 始点 / 相手 / 立ち位置
+    private int _selfCompletedWindow = -1;       // 完了済みウィンドウ。_currentWindow と一致で完了
+    private string _instruction = "";            // 画面に出す指示文
+
+    // ---- ClearGuide が戻す: 終盤の誘導表示 ------------------------------------
+    private Vector3? _guideDestination;      // 誘導先。null なら非表示
+    private GuidanceKind _guideKind;         // 誘導の種類
+    private uint _guideActionId;             // どのアクションに紐づく誘導か
+    private string _guideText = "";          // 誘導の本文
+    private string _guideInstruction = "";   // 併記する指示
+    private string _guideDebug = "";         // 算出根拠 (Debug 表示用)
+
+    // ---- ClearBlackHoleState が戻す: ブラックホールの実体 ----------------------
+    private readonly List<Vector3> _blackHolePositions = [];  // 生存中のブラックホール座標
+    private readonly HashSet<int> _hitSources = [];           // 着弾済みの bucket
+
+    // ---- ClearCurrentWindowTethers が戻す: 現ウィンドウの線 --------------------
+    private readonly Dictionary<int, uint> _tetherTargets = [];     // bucket -> 線の相手
+    private readonly Dictionary<int, Vector3> _tetherSources = [];  // bucket -> 線の始点
+
+    // ---- ClearFixedLaneSetBuckets が戻す: FixedMarkerLanes モード専用 ----------
+    private readonly int[] _fixedLaneSetBuckets = [-1, -1, -1];  // レーンごとに確定した bucket
+    private int _fixedLaneSetStartWindow = -1;                   // そのキャッシュが有効な開始ウィンドウ
 
     /// <summary>Position of the Black Hole this player is assigned to, i.e. the tether origin.</summary>
     private Vector3? SelfTetherSource => _selfBlackHoleTask?.Source;
@@ -326,6 +379,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* public properties                                                */
     /********************************************************************/
+    // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
     public override Metadata Metadata => new(41, "Garume, Redmoon");
 
@@ -335,6 +389,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* public methods (SplatoonScript overrides)                        */
     /********************************************************************/
+    // Splatoon から呼ばれる入口。
+    // 詠唱 (OnStartingCast) = 予告して表示、着弾 (OnActionEffectEvent) = 消して次へ、
+    // という役割分担になっている。判定の実体は下の private 区画にある。
     public override void OnSetup()
     {
         C.EnsureDefaults();
@@ -557,6 +614,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ShowGuidance();
     }
 
+    /// <summary>毎フレームの表示更新。線 -> ブラックホールの立ち位置 -> 終盤の誘導、の順に出す。
+    /// 設定で終盤ナビや線のみ表示に絞られている場合はここで打ち切る。</summary>
     private void ShowGuidance()
     {
         if (_state == State.FinalSequence && !C.ShowPostBlackHoleNavigation)
@@ -596,6 +655,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : settings UI                                    */
     /********************************************************************/
+    // OnSettingsDraw から呼ばれる描画のみ。ロジックを持たない。
+    // 設定は 62 項目あり、割り当てモード 5 種それぞれに対応する UI がここに並ぶ。
     private void DrawAssignmentSettings()
     {
         ImGui.TextUnformatted("Assignment");
@@ -848,6 +909,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : state transition                               */
     /********************************************************************/
+    // _state を進める処理と、自機が差し替わったとき (BasePlayer override) の再解決。
+    /// <summary>割り当て収集フェーズに入る。前回が完了済みなら状態を巻き戻してから入る。</summary>
     private void StartCollection()
     {
         if (_state == State.Completed)
@@ -860,6 +923,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             _state = State.CollectingAssignments;
     }
 
+    /// <summary>ブラックホールフェーズに入る。ウィンドウを 0 に戻し、
+    /// 線・レーン・自分の担当・誘導のキャッシュをすべて捨てる。</summary>
     private void StartBlackHole()
     {
         StartCollection();
@@ -873,6 +938,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ClearGuide();
     }
 
+    /// <summary>自機が差し替わったか (duty replay の Base Player Override) を検出し、
+    /// 変わっていれば自分の解決結果と送信待ちのマーカーを捨てて解き直させる。</summary>
     private void RefreshBasePlayerState()
     {
         var id = BasePlayer?.EntityId ?? 0;
@@ -922,6 +989,13 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : slot resolution                                */
     /********************************************************************/
+    // 「自分がどのスロットか」を決める中核。TryResolveSlot が入口で、
+    // 設定の AssignmentMode に応じて TryMarkerSlot / TryPrioritySlot / TryRoleAccretionSlot に分岐する。
+    //
+    // 注意: ここは自分の分しか解かない。他人の解決結果を保持する入れ物が無いため、
+    // 2 人が同じスロットに解決しても検出できない (上流からの既知の弱点)。
+    /// <summary>自分のスロットが未解決なら 1 度だけ解く。解けなければ「未確定」を表示する。
+    /// 既に解決済み (<c>_selfSlot != Slot.None</c>) なら何もしない。</summary>
     private void ResolveSelfSlot()
     {
         var me = BasePlayer;
@@ -946,6 +1020,10 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _instruction = "";
     }
 
+    /// <summary>指定プレイヤーのスロットを、設定の <see cref="AssignmentMode"/> に従って決める。</summary>
+    /// <remarks>引数でプレイヤーを取るので全員分を解けるが、実際の呼び出しは自機と
+    /// <c>TryFirstPairBucket</c> 内の 1 人だけ。他人の結果を保持する入れ物が無いため、
+    /// スロットの衝突は検出されない。</remarks>
     private bool TryResolveSlot(IPlayerCharacter player, out Slot slot, out AssignmentQuality quality)
     {
         quality = AssignmentQuality.Unknown;
@@ -1023,6 +1101,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : black hole tether                              */
     /********************************************************************/
+    // ブラックホール実体と線の観測・キャッシュ。毎フレーム PollLiveBlackHoleTethers から回る。
+    // 観測できるものは観測し、足りない分を bucket (方角 0..3) に量子化して扱う。
     private void RefreshExpectedTether()
     {
         var expected = ExpectedBucket(_selfSlot);
@@ -1055,6 +1135,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         SetSelfTether(source, expected, target);
     }
 
+    /// <summary>第1/第2/第3対象がそれぞれ 3/3/2 人そろっているか。
+    /// 唯一の完全性検査だが、呼ばれるのは Priority と RoleAccretion 系のみで、
+    /// 既定の PartyMarker モードでは通らない。</summary>
     private bool HasCompleteGroups()
     {
         return _groups.Count(x => x.Value == TargetGroup.Attack) == 3 &&
@@ -1069,6 +1152,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _selfCompletedWindow = -1;
     }
 
+    /// <summary>毎フレーム、生存中のブラックホールと現在張られている線を観測し直す。
+    /// 前フレームのキャッシュは破棄するので、消えた線は自動的に落ちる。</summary>
     private void PollLiveBlackHoleTethers()
     {
         CacheLiveBlackHoleActors();
@@ -1180,6 +1265,13 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : marker command                                 */
     /********************************************************************/
+    // 頭上マーカーの自動設置。ここだけがサーバに届く副作用を持つ。
+    //
+    // 安全側の作りになっている:
+    //   - C.ExecuteMarkerCommand が既定 OFF のオプトイン
+    //   - _sentMarkerCommand による一発ガード
+    //   - DutyRecorderPlayback を二重にチェック (キュー時と実行時)
+    //   - 0.1〜0.8 秒のランダム遅延で 8 クライアントの同時発火を散らす
     private void RunMarkerCommand(TargetGroup group)
     {
         if (C.MarkerCommandSource != MarkerCommandSource.TargetDebuff)
@@ -1225,6 +1317,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _pendingTargetMarkerCommand = false;
     }
 
+    /// <summary>マーカー設置コマンドを送信予約する。実際の送信は
+    /// <see cref="ExecutePendingMarkerCommand"/> が遅延後に行う。
+    /// 一発ガード・オプトイン・リプレイ判定をここで通す。</summary>
     private void QueueMarkerCommand(string command, bool targetDebuffCommand = false)
     {
         if (_sentMarkerCommand) return;
@@ -1241,6 +1336,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _markerCommandAtMs = Environment.TickCount64 + ToRandomDelayMs(C.MarkerDelayMinSeconds, C.MarkerDelayMaxSeconds);
     }
 
+    /// <summary>予約時刻を過ぎていれば実際にコマンドを送る。**ここだけがサーバに届く**。
+    /// 送信直前にもリプレイ判定を行う。</summary>
     private void ExecutePendingMarkerCommand()
     {
         if (_markerCommandAtMs <= 0 || Environment.TickCount64 < _markerCommandAtMs) return;
@@ -1259,6 +1356,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : window advance                                 */
     /********************************************************************/
+    // ウィンドウ 0..9 の進行。着弾した bucket が自分の担当なら完了とみなして次へ。
     private void SetSelfTether(Vector3 source, int bucket, uint target)
     {
         var flatSource = FlatPosition(source);
@@ -1267,6 +1365,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _instruction = LineWindowInstruction();
     }
 
+    /// <summary>着弾した bucket を受けてウィンドウを進める。
+    /// その bucket が自分の担当 (実際に取った線か、期待値) なら当該ウィンドウを完了とみなす。</summary>
     private void AdvanceWindow(int sourceBucket)
     {
         if (_state != State.BlackHoleActive || _currentWindow is < 0 or > 9) return;
@@ -1296,6 +1396,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : final sequence                                 */
     /********************************************************************/
+    // 終盤 (Blizzaga 以降) の誘導。中央誘導 -> ロール散開 -> 着地 -> 塔 -> 散開移動。
+    // 進行は _finalStage と複数のカウンタで管理される。
     private void EnterFinalSequence()
     {
         if (_state == State.Completed) return;
@@ -1430,6 +1532,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         }
     }
 
+    /// <summary>ギミック終了。表示を消して完了状態にする。自分の解決結果は残す。</summary>
     private void Complete()
     {
         _state = State.Completed;
@@ -1443,6 +1546,10 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : reset                                          */
     /********************************************************************/
+    // 状態の巻き戻し。ResetAll から下位の Clear が順に呼ばれる。
+    // どのフィールドがどの Clear に属すかは private fields 区画のコメント参照。
+    /// <summary>完全初期化。戦闘開始・終了・ディレクタ更新から呼ばれる。
+    /// 下位の Clear をすべて経由するので、フィールドを足したらどれかに追加すること。</summary>
     private void ResetAll()
     {
         _groups.Clear();
@@ -1501,6 +1608,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : display                                        */
     /********************************************************************/
+    // element の表示・非表示。ここまで来た時点で判定は終わっている。
     private void ShowDestination(Vector3 destination, string text, uint? color = null)
     {
         if (!Controller.TryGetElementByName(DestinationElement, out var element)) return;
@@ -1581,6 +1689,11 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : geometry / kefka anchor                        */
     /********************************************************************/
+    // 座標・角度の計算と、ケフカ位置の確定。
+    //
+    // ケフカは ID で取れないことがあるため、回転角が最も近いオブジェクトを同一とみなす
+    // 推定 (TryCaptureKefkaFromMatchingClone、許容 45 度) を使う。
+    // 当たっている間は動くが、モーションが変われば静かに壊れる種類の実装。
     private static bool TryResolveBlackHoleTether(uint source, uint target, out uint blackHoleId,
         out uint tetherTarget, out Vector3 blackHolePosition, out int bucket)
     {
@@ -1668,6 +1781,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _kefkaAnchorDebug = $"cast-rotation {Deg(rotation):F1}{SignedDeg(offset)}";
     }
 
+    /// <summary>回転角が最も近いアンカー候補をケフカとみなして位置を確定する。
+    /// 許容差は 45 度 (<see cref="KefkaRotationMatchMax"/>) と広く、ID は確定しない
+    /// (<c>_kefkaId</c> は 0 のまま)。観測ではなく推定なので、モーションが変わると崩れる。</summary>
     private bool TryCaptureKefkaFromMatchingClone(float rotation)
     {
         IGameObject? best = null;
@@ -1879,6 +1995,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return Math.Min(diff, MathF.PI * 2.0f - diff);
     }
 
+    /// <summary>線の始点から見た立ち位置を返す。まず基準角 (±45 度) と半径で候補を作り、
+    /// ブラックホールに近すぎる場合は半径と角度を刻んで総当たりで離れた点を探す。
+    /// 見つからなければ最も離れていた候補を返す (必ず何かを返す)。</summary>
     private Vector3 BlackHoleStandPosition(Vector3 source)
     {
         var direction = _currentWindow == 0 && C.FirstWindowBaitDirection != FirstWindowBaitDirection.SameAsLineBaitDirection
@@ -1943,6 +2062,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : bucket expectation                             */
     /********************************************************************/
+    // 「自分はどの bucket を取るべきか」の期待値算出。割り当てモードごとに経路が分かれる。
+    // ウィンドウ 0,1,8,9 は snake、2〜7 は marker flex という別扱いがある。
     private LineBaitDirection LaneBaitDirection(int lane)
     {
         if (lane == 2) return C.AccretionLineBaitDirection;
@@ -2147,6 +2268,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : debug text                                     */
     /********************************************************************/
+    // Debug 表示用の文字列生成のみ。判定には影響しない。
     private string BlackHoleExpectedDebugText(string reason)
     {
         var expected = ExpectedBucket(_selfSlot);
@@ -2271,6 +2393,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* private methods : helpers                                        */
     /********************************************************************/
+    // 純粋関数と小さな変換。状態を持たない。
     private static int ExpectedRank(Slot slot, int window) =>
         window >= 0 && window < BlackHoleWindowSlots.Length
             ? Array.IndexOf(BlackHoleWindowSlots[window], slot)
@@ -2701,6 +2824,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     /* types                                                            */
     /********************************************************************/
+    // 入れ子型。State 系 enum、設定用の公開 enum、Config。
+    // Config は 62 項目あり、正しさが 8 人の設定一致に依存する点に注意。
     private readonly record struct BlackHoleTask(int Bucket, Vector3 Source, uint Target, Vector3 StandPosition);
 
     private enum State { Idle, CollectingAssignments, BlackHoleActive, FinalSequence, Completed }
