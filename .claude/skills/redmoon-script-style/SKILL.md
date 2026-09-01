@@ -7,6 +7,13 @@ description: Redmoon 本人の Splatoon スクリプトの書き方 (作法・�
 
 出典: `Splatoon/SplatoonScripts/Duties/Dawntrail/The Futures Rewritten/FullToolerPartyOnlyScrtipts/`
 の 12 本 (`P1 Burn Strike Tower` を除く / 計 13,526 行) を解析したもの。数値は実測値。
+基準コミットは Splatoon `d5017695` (2026-08-27)。
+
+> **書式については注意。** これらのファイルは 2025-04-15 の公式リポジトリ横断コミット
+> `398eb817 "Auto-refactor"` で機械的に整形されている (12 ファイル / 約 1,760 行が書き換え)。
+> したがってリポジトリ上の書式 = 本人の書式ではない。素の書き方を見たいときは、この refactor から
+> 漏れている `P2 Diamond Dust Full Toolers.cs` を参照する。
+> 設計 (§4〜§9) は本人の手によるもので、refactor の影響を受けていない。
 
 この作法は **固定 8 人パーティ (Full Tooler Party) 専用**という前提から全部が導かれている。
 「誰が何をするか」をユーザに設定させず、**ジョブから機械的に決める**。だから Priority も
@@ -600,13 +607,21 @@ if(myHourGlass == null) { ExceptionReturn("myHourGlass is null"); return; }
 
 ## 12. 書式
 
-- `if(` は**空白なし** (1090 : 158)。NightmareXIV 側のコードスタイルに揃えている。
+- **`if (` / `for (` / `foreach (` と空白を空けて書く。**
+  リポジトリ上では `if(` が 1090 : 158 で多数派だが、これは本人の書き方ではない。
+  2025-04-15 の公式リポジトリ横断コミット `398eb817 "Auto-refactor"` が 12 ファイルを機械変換した結果で、
+  同じコミットが `new List<...>()` → `[]`、`:SplatoonScript` → `: SplatoonScript`、
+  `this.EntityId` → `EntityId` も一括適用している。
+  **`P2 Diamond Dust Full Toolers.cs` だけこの refactor から漏れており** (`if (` 113 / `if(` 0、
+  `for (` 2、`foreach (` 4、`switch (` 1、`this.` 1)、そこに素の書き方が残っている。
+  自分のリポジトリで新規に書くなら `if (` 側でよい。
 - ローカル変数はほぼ `var`。
 - コメントは日本語 567 行 / 英語 656 行。**自作 API の説明は英語、ギミックの説明は日本語**
   という分かれ方をしている (`// 左翼攻撃`, `// リストに８人分の初期インスタンス生成`, `// 1人`)。
 - 座標は実測値をそのまま書く (`new Vector3(90.228f, 0, 116.768f)`)。整数に丸めない。
 - `switch` 式 (`direction switch { ... }`) をよく使う (84 箇所)。
-- コレクション式 `[]` / `[..]` を使う (`_partyDataList = []`, `ValidTerritories => [1238]`)。
+- コレクション式 `[]` / `[..]` (`_partyDataList = []`, `ValidTerritories => [1238]`)。
+  ただしこれも大半は上記 Auto-refactor による変換。素の Diamond Dust では `new()` と `[]` が混在している。
 
 ---
 

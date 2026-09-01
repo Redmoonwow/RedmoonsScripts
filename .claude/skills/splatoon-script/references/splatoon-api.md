@@ -2,6 +2,11 @@
 
 ソース: `Splatoon/Splatoon/SplatoonScripting/`, `Splatoon/Splatoon/Serializables/`
 
+> **基準バージョン**: Splatoon `d5017695` (2026-08-27) と、そこに pin されている
+> ECommons `cd1a88da` (2026-07-01) / FFXIVClientStructs `0769d1f1` / Dalamud dev libs。
+> スクリプトは Splatoon が同梱する版に対してコンパイルされるので、**上流の最新ではなく
+> この pin が正**。`git submodule status` が上記と違っていたら、この文書を再検証すること。
+
 ---
 
 ## 1. `SplatoonScript` 基底クラス

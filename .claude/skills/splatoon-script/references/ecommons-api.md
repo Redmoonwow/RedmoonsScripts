@@ -2,6 +2,11 @@
 
 ソース: `Splatoon/ECommons/ECommons/`
 
+> **基準バージョン**: Splatoon `d5017695` (2026-08-27) と、そこに pin されている
+> ECommons `cd1a88da` (2026-07-01) / FFXIVClientStructs `0769d1f1` / Dalamud dev libs。
+> スクリプトは Splatoon が同梱する版に対してコンパイルされるので、**上流の最新ではなく
+> この pin が正**。`git submodule status` が上記と違っていたら、この文書を再検証すること。
+
 Splatoon スクリプトが使う土台ライブラリ。名前空間ごとにまとめる。
 公式 340 スクリプトでの import 頻度も併記した (どれを覚えるべきかの目安)。
 
