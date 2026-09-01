@@ -31,12 +31,48 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// Behaviour is unchanged from upstream; this copy only differs in namespace and
 /// in conformance to the .NET naming and member-ordering conventions.
 ///
-/// Member layout follows the standard order and can be navigated by it:
-/// constants, static read-only tables, instance fields, properties,
-/// SplatoonScript overrides, private helpers, nested types.
+/// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
+/// 振る舞いを変えずに region で目次を付け、下に入口からの地図を置いた。
+///
+/// region の並び (この順に上から):
+///   const / static tables / private fields / public properties
+///   public methods (SplatoonScript overrides)
+///   private methods : settings UI / state transition / slot resolution /
+///                     black hole tether / marker command / window advance /
+///                     final sequence / reset / display /
+///                     geometry, kefka anchor / bucket expectation /
+///                     debug text / helpers
+///   types
+///
+/// 入口から最初に呼ばれるもの (ここから辿れば全体に届く):
+///   OnSetup             : (何も呼ばない。element 登録のみ)
+///   OnDirectorUpdate    : ResetAll
+///   OnStartingCast      : HandleStartingCast
+///   OnActionEffectEvent : RefreshBasePlayerState, ObserveFinalTowerSource, TryBucket,
+///                         AdvanceWindow, HandleFinalAction, Complete
+///   OnGainBuffEffect    : RefreshBasePlayerState, StartCollection, GroupFromStatus,
+///                         RunMarkerCommand, RunAccretionMarkerCommand,
+///                         CancelPendingTargetMarkerCommandForAccretion, ClearSelfResolution
+///   OnRemoveBuffEffect  : RefreshBasePlayerState, EnterFinalSequence
+///   OnActorControl      : RefreshBasePlayerState, TryFinalStackRole, RecordFinalStackRole
+///   OnUpdate            : RefreshBasePlayerState, ExecutePendingMarkerCommand, HideElements,
+///                         RefreshKefkaAnchorFromObject, ResolveSelfSlot,
+///                         PollLiveBlackHoleTethers, ShowGuidance
+///   OnCombatStart / OnCombatEnd / OnReset : ResetAll
+///   OnSettingsDraw      : Draw... 系 6 本
+///
+/// 検証上の注意 (上流からの既知の弱点。振る舞いを変えていないので残っている):
+///   自分のスロットしか解決せず、他人の結果を保持する入れ物が無い。
+///   したがって 2 人が同じスロットに解決しても検出できない。
+///   完全性検査は HasCompleteGroups だけで、しかも既定の PartyMarker モードでは呼ばれない。
+///   正しさが 8 人の設定一致に依存し、そのズレを検出する手段が無い。
 /// </remarks>
 public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 {
+    #region const
+    /********************************************************************/
+    /* const                                                            */
+    /********************************************************************/
     private const uint TerritoryDancingMadUltimate = 1363;
     private const uint KefkaDataId = 19451;
     private const uint FinalDondokoDataId = 19504;
@@ -89,6 +125,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private const string BlackHoleLineElement = "BlackHoleLine";
     private const float DefaultColorAlpha = 200.0f / 255.0f;
 
+    #endregion
+
+    #region static tables
+    /********************************************************************/
+    /* static tables                                                    */
+    /********************************************************************/
     private static readonly Vector3 Center = new(100f, 0f, 100f);
     private static readonly Slot[][] BlackHoleWindowSlots =
     [
@@ -220,6 +262,13 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         Jp = "Center は既存の全員中央誘導です。Kefka-relative N/S は、固定したケフカ足元方向を基準に、選択したロールをケフカ基準北、もう片方を南へ誘導します。"
     };
 
+    #endregion
+
+    #region private fields
+    /********************************************************************/
+    /* private fields                                                   */
+    /********************************************************************/
+
     private readonly Dictionary<uint, TargetGroup> _groups = [];
     private readonly Dictionary<int, uint> _tetherTargets = [];
     private readonly Dictionary<int, Vector3> _tetherSources = [];
@@ -271,9 +320,21 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /// <summary>Lane bucket of this player's assigned Black Hole, or -1 when unassigned.</summary>
     private int SelfTetherBucket => _selfBlackHoleTask?.Bucket ?? -1;
 
+    #endregion
+
+    #region public properties
+    /********************************************************************/
+    /* public properties                                                */
+    /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
     public override Metadata Metadata => new(41, "Garume, Redmoon");
 
+    #endregion
+
+    #region public methods (SplatoonScript overrides)
+    /********************************************************************/
+    /* public methods (SplatoonScript overrides)                        */
+    /********************************************************************/
     public override void OnSetup()
     {
         C.EnsureDefaults();
@@ -529,6 +590,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         DrawDebugStatus();
     }
 
+    #endregion
+
+    #region private methods : settings UI
+    /********************************************************************/
+    /* private methods : settings UI                                    */
+    /********************************************************************/
     private void DrawAssignmentSettings()
     {
         ImGui.TextUnformatted("Assignment");
@@ -775,6 +842,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ImGui.Unindent();
     }
 
+    #endregion
+
+    #region private methods : state transition
+    /********************************************************************/
+    /* private methods : state transition                               */
+    /********************************************************************/
     private void StartCollection()
     {
         if (_state == State.Completed)
@@ -843,6 +916,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         }
     }
 
+    #endregion
+
+    #region private methods : slot resolution
+    /********************************************************************/
+    /* private methods : slot resolution                                */
+    /********************************************************************/
     private void ResolveSelfSlot()
     {
         var me = BasePlayer;
@@ -938,6 +1017,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return slot != Slot.None;
     }
 
+    #endregion
+
+    #region private methods : black hole tether
+    /********************************************************************/
+    /* private methods : black hole tether                              */
+    /********************************************************************/
     private void RefreshExpectedTether()
     {
         var expected = ExpectedBucket(_selfSlot);
@@ -1089,6 +1174,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return -1;
     }
 
+    #endregion
+
+    #region private methods : marker command
+    /********************************************************************/
+    /* private methods : marker command                                 */
+    /********************************************************************/
     private void RunMarkerCommand(TargetGroup group)
     {
         if (C.MarkerCommandSource != MarkerCommandSource.TargetDebuff)
@@ -1162,6 +1253,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             Chat.ExecuteCommand(command);
     }
 
+    #endregion
+
+    #region private methods : window advance
+    /********************************************************************/
+    /* private methods : window advance                                 */
+    /********************************************************************/
     private void SetSelfTether(Vector3 source, int bucket, uint target)
     {
         var flatSource = FlatPosition(source);
@@ -1193,6 +1290,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             EnterFinalSequence();
     }
 
+    #endregion
+
+    #region private methods : final sequence
+    /********************************************************************/
+    /* private methods : final sequence                                 */
+    /********************************************************************/
     private void EnterFinalSequence()
     {
         if (_state == State.Completed) return;
@@ -1334,6 +1437,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         HideElements();
     }
 
+    #endregion
+
+    #region private methods : reset
+    /********************************************************************/
+    /* private methods : reset                                          */
+    /********************************************************************/
     private void ResetAll()
     {
         _groups.Clear();
@@ -1386,6 +1495,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ClearFixedLaneSetBuckets();
     }
 
+    #endregion
+
+    #region private methods : display
+    /********************************************************************/
+    /* private methods : display                                        */
+    /********************************************************************/
     private void ShowDestination(Vector3 destination, string text, uint? color = null)
     {
         if (!Controller.TryGetElementByName(DestinationElement, out var element)) return;
@@ -1460,6 +1575,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             element.Enabled = false;
     }
 
+    #endregion
+
+    #region private methods : geometry / kefka anchor
+    /********************************************************************/
+    /* private methods : geometry / kefka anchor                        */
+    /********************************************************************/
     private static bool TryResolveBlackHoleTether(uint source, uint target, out uint blackHoleId,
         out uint tetherTarget, out Vector3 blackHolePosition, out int bucket)
     {
@@ -1816,6 +1937,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         }
     }
 
+    #endregion
+
+    #region private methods : bucket expectation
+    /********************************************************************/
+    /* private methods : bucket expectation                             */
+    /********************************************************************/
     private LineBaitDirection LaneBaitDirection(int lane)
     {
         if (lane == 2) return C.AccretionLineBaitDirection;
@@ -2014,6 +2141,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return false;
     }
 
+    #endregion
+
+    #region private methods : debug text
+    /********************************************************************/
+    /* private methods : debug text                                     */
+    /********************************************************************/
     private string BlackHoleExpectedDebugText(string reason)
     {
         var expected = ExpectedBucket(_selfSlot);
@@ -2132,6 +2265,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return string.Join(" ", parts);
     }
 
+    #endregion
+
+    #region private methods : helpers
+    /********************************************************************/
+    /* private methods : helpers                                        */
+    /********************************************************************/
     private static int ExpectedRank(Slot slot, int window) =>
         window >= 0 && window < BlackHoleWindowSlots.Length
             ? Array.IndexOf(BlackHoleWindowSlots[window], slot)
@@ -2556,6 +2695,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         }
     }
 
+    #endregion
+
+    #region types
+    /********************************************************************/
+    /* types                                                            */
+    /********************************************************************/
     private readonly record struct BlackHoleTask(int Bucket, Vector3 Source, uint Target, Vector3 StandPosition);
 
     private enum State { Idle, CollectingAssignments, BlackHoleActive, FinalSequence, Completed }
@@ -2704,4 +2849,6 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         private static LineBaitDirection ClampLineBaitDirection(LineBaitDirection direction) =>
             (LineBaitDirection)Math.Clamp((int)direction, 0, LineBaitDirectionNames.Length - 1);
     }
+    #endregion
+
 }
