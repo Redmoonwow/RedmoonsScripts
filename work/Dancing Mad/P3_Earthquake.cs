@@ -10,6 +10,7 @@ using ECommons;
 using ECommons.Automation;
 using ECommons.DalamudServices;
 using ECommons.GameFunctions;
+using ECommons.Logging;
 using ECommons.Hooks;
 using ECommons.Hooks.ActionEffectTypes;
 using ECommons.ImGuiMethods;
@@ -249,11 +250,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private int _finalStackMarkerCount;
     private int _finalDondokoHitCount;
     private bool _sentMarkerCommand;
+    private bool _placedMasterMarkers;
     private bool _selfHadAccretionMarkerBlock;
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(42, "Garume");
+    public override Metadata Metadata => new(43, "Garume");
 
     public override void OnSetup()
     {
@@ -476,6 +478,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     {
         RefreshBasePlayerState();
         ExecutePendingMarkerCommand();
+        TryPlaceMasterMarkers();
 
         HideElements();
         RefreshKefkaAnchorFromObject();
@@ -684,6 +687,22 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ImGui.TextWrapped(MarkerCommandDescription.Get());
         ImGui.Spacing();
         ImGui.Checkbox("Execute self marker command", ref C.ExecuteMarkerCommand);
+        ImGui.Spacing();
+        ImGui.Checkbox("Master: place party markers from priority list", ref C.MarkerMaster);
+        if (C.MarkerMaster)
+        {
+            ImGui.Indent();
+            ImGui.TextWrapped(
+                "Exactly one player in the party may enable this. Markers are placed from the priority "
+                + "list once every group is resolvable and the eight slots are distinct. Nothing reads "
+                + "them back - every client still resolves from the priority list, so the markers are "
+                + "for the humans. Commands go through Splatoon's queue (170ms apart, not sent during "
+                + "duty replay) and are logged.");
+            ImGui.Checkbox("Clear markers before placing", ref C.MarkerMasterClearFirst);
+            DrawCommand("Clear command ({0} = party number)", ref C.MarkerMasterClearCommand);
+            ImGui.Unindent();
+        }
+        ImGui.Spacing();
         var source = (int)C.MarkerCommandSource;
         if (DrawCombo("Marker command source", ref source, MarkerCommandSourceNames, 180f))
             C.MarkerCommandSource = (MarkerCommandSource)Math.Clamp(source, 0, MarkerCommandSourceNames.Length - 1);
@@ -1095,6 +1114,89 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return -1;
     }
 
+    // Places the whole party's head markers from the priority list, reproducing the layout that
+    // PartyMarker mode reads. Nothing reads them back: every client still resolves from the
+    // priority list itself, so a late or missing marker cannot change what anyone is told to do.
+    // The markers exist for the humans.
+    //
+    // Runs once per mechanic, on the master only, and only once every group is resolvable and the
+    // eight slots come out distinct - an inconsistent priority list places nothing at all.
+    //
+    // Commands are issued in rank order within each group because the bare "/mk attack" form
+    // assigns the lowest free number; every official script uses that form and none use a
+    // numbered one. If the numbered form turns out to work in game, set the command strings to it
+    // and the ordering stops mattering.
+    private void TryPlaceMasterMarkers()
+    {
+        if (!C.MarkerMaster || _placedMasterMarkers) return;
+        if (_state is not (State.CollectingAssignments or State.BlackHoleActive)) return;
+
+        var order = new List<(int Rank, TargetGroup Group, uint EntityId)>();
+        foreach (var pc in FakeParty.Get())
+        {
+            var group = _groups.GetValueOrDefault(pc.EntityId);
+            if (group == TargetGroup.None) return;               // not everyone has a debuff yet
+            if (!TryPrioritySlot(pc, group, out var slot)) return; // priority cannot place them yet
+            order.Add((RankFromSlot(slot), group, pc.EntityId));
+        }
+
+        if (order.Count != 8) return;
+        if (order.Select(x => (x.Group, x.Rank)).Distinct().Count() != 8)
+        {
+            PluginLog.Warning("[P3_Earthquake] priority produced duplicate slots; placing nothing");
+            return;
+        }
+
+        var tags = new Dictionary<uint, int>();
+        foreach (var entry in order)
+        {
+            var tag = GetPlayerTag(entry.EntityId);
+            if (tag == -1) return;                                // party numbers not resolvable yet
+            tags[entry.EntityId] = tag;
+        }
+
+        _placedMasterMarkers = true;
+
+        if (C.MarkerMasterClearFirst)
+            foreach (var tag in tags.Values.OrderBy(x => x))
+                EnqueueMasterCommand(string.Format(C.MarkerMasterClearCommand, tag));
+
+        foreach (var entry in order.OrderBy(x => x.Group).ThenBy(x => x.Rank))
+        {
+            var command = entry.Group switch
+            {
+                TargetGroup.Attack => C.FirstTargetCommand,
+                TargetGroup.Bind => C.SecondTargetCommand,
+                TargetGroup.Stop => C.ThirdTargetCommand,
+                _ => ""
+            };
+            if (command.Length == 0) continue;
+            EnqueueMasterCommand(command.Replace("<me>", $"<{tags[entry.EntityId]}>"));
+        }
+    }
+
+    // Splatoon's own queue handles the replay guard, the 170ms spacing between messages and the
+    // cancellation on reset, so none of that is repeated here.
+    // EntityId から <1>..<8> のパーティ番号を引く。範囲外や解決できない場合は -1。
+    // 注意: duty recorder 再生中は ExtendedPronoun がオブジェクトテーブル順で返すため、
+    // 実プレイのパーティ番号とは一致しない。
+    private int GetPlayerTag(uint entityId)
+    {
+        for (var i = 1; i <= 8; i++)
+        {
+            var obj = FakePronoun.Resolve($"<{i}>");
+            if (obj != null && obj->EntityId == entityId)
+                return i;
+        }
+        return -1;
+    }
+
+    private void EnqueueMasterCommand(string command)
+    {
+        PluginLog.Information($"[P3_Earthquake] master marker: {command}");
+        Controller.DangerousEnqueueCommand(command, false);
+    }
+
     private void RunMarkerCommand(TargetGroup group)
     {
         if (C.MarkerCommandSource != MarkerCommandSource.TargetDebuff)
@@ -1355,6 +1457,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
     private void ClearMechanicState(bool clearSlot)
     {
+        _placedMasterMarkers = false;
         _earthPlayers.Clear();
         _accretionPlayers.Clear();
         _selfHadAccretionMarkerBlock = false;
@@ -2619,6 +2722,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         public string SecondTargetCommand = "/mk bind <me>";
         public string ThirdTargetCommand = "/mk stop <me>";
         public string AccretionCommand = "/mk bind <me>";
+        // Master places the whole party's head markers from the priority list, so the layout a
+        // PartyMarker reader would expect is reproduced without anyone waiting on markers to
+        // decide anything. Exactly one player in the party may enable this.
+        public bool MarkerMaster;
+        public bool MarkerMasterClearFirst = true;
+        public string MarkerMasterClearCommand = "/mk off <{0}>";
         public PriorityData PriorityData = CreatePriorityData("P3 Earthquake priority",
             "Used when assignment mode is Priority.", DefaultRolePriority);
 
