@@ -688,8 +688,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ImGui.Spacing();
         ImGui.Checkbox("Execute self marker command", ref C.ExecuteMarkerCommand);
         ImGui.Spacing();
-        ImGui.Checkbox("Master: place party markers from priority list", ref C.MarkerMaster);
-        if (C.MarkerMaster)
+        ImGui.Checkbox("Is master (place party markers from priority list)", ref C.IsMaster);
+        if (C.IsMaster)
         {
             ImGui.Indent();
             ImGui.TextWrapped(
@@ -698,8 +698,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
                 + "them back - every client still resolves from the priority list, so the markers are "
                 + "for the humans. Commands go through Splatoon's queue (170ms apart, not sent during "
                 + "duty replay) and are logged.");
-            ImGui.Checkbox("Clear markers before placing", ref C.MarkerMasterClearFirst);
-            DrawCommand("Clear command ({0} = party number)", ref C.MarkerMasterClearCommand);
+            ImGui.Checkbox("Clear markers before placing", ref C.IsMasterClearFirst);
+            DrawCommand("Clear command ({0} = party number)", ref C.IsMasterClearCommand);
             ImGui.Unindent();
         }
         ImGui.Spacing();
@@ -1128,7 +1128,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     // and the ordering stops mattering.
     private void TryPlaceMasterMarkers()
     {
-        if (!C.MarkerMaster || _placedMasterMarkers) return;
+        if (!C.IsMaster || _placedMasterMarkers) return;
         if (_state is not (State.CollectingAssignments or State.BlackHoleActive)) return;
 
         var order = new List<(int Rank, TargetGroup Group, uint EntityId)>();
@@ -1157,9 +1157,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
         _placedMasterMarkers = true;
 
-        if (C.MarkerMasterClearFirst)
+        if (C.IsMasterClearFirst)
             foreach (var tag in tags.Values.OrderBy(x => x))
-                EnqueueMasterCommand(string.Format(C.MarkerMasterClearCommand, tag));
+                EnqueueMasterCommand(string.Format(C.IsMasterClearCommand, tag));
 
         foreach (var entry in order.OrderBy(x => x.Group).ThenBy(x => x.Rank))
         {
@@ -2725,9 +2725,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         // Master places the whole party's head markers from the priority list, so the layout a
         // PartyMarker reader would expect is reproduced without anyone waiting on markers to
         // decide anything. Exactly one player in the party may enable this.
-        public bool MarkerMaster;
-        public bool MarkerMasterClearFirst = true;
-        public string MarkerMasterClearCommand = "/mk off <{0}>";
+        public bool IsMaster;
+        public bool IsMasterClearFirst = true;
+        public string IsMasterClearCommand = "/mk off <{0}>";
         public PriorityData PriorityData = CreatePriorityData("P3 Earthquake priority",
             "Used when assignment mode is Priority.", DefaultRolePriority);
 
