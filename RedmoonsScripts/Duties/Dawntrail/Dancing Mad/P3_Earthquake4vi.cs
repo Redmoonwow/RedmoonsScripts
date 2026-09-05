@@ -45,6 +45,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v49 リプレイ中は自分用マーカーを送らず /echo でチャット欄に出す -> QueueMarkerCommand
 ///   v50 /mk を撃つのが誰かを 1 つのモードにして排他にする (Off / 各自 / マスター)
 ///                                                       -> Config.MarkerPlacement
+///   v51 優先順位リストのプリセットに「ヒーラー優先」を追加 -> DrawAssignmentSettings
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
@@ -149,6 +150,17 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         RolePosition.T2,
         RolePosition.H1,
         RolePosition.H2,
+        RolePosition.M1,
+        RolePosition.M2,
+        RolePosition.R1,
+        RolePosition.R2
+    ];
+    private static readonly RolePosition[] HealersFirstPriority =
+    [
+        RolePosition.H1,
+        RolePosition.H2,
+        RolePosition.T1,
+        RolePosition.T2,
         RolePosition.M1,
         RolePosition.M2,
         RolePosition.R1,
@@ -297,7 +309,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(50, "Garume, Redmoon");
+    public override Metadata Metadata => new(51, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -640,6 +652,10 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             if (ImGui.Button("Apply Meow static TN priority"))
                 C.PriorityData = CreatePriorityData("P3 Earthquake Meow static TN priority",
                     "M1 - M2 - R1 - R2 - MT - OT - H1 - H2.", MeowStaticTrueNorthPriority);
+            if (ImGui.Button("Apply healers first priority"))
+                C.PriorityData = CreatePriorityData("P3 Earthquake healers first priority",
+                    "H1 - H2 - MT - OT - M1 - M2 - R1 - R2. Healers take rank 0 in whichever group "
+                    + "they land in, so they get marker 1 there.", HealersFirstPriority);
             C.PriorityData.Draw();
         }
 

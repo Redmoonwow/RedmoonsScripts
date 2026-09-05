@@ -39,6 +39,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v49 リプレイ中は自分用マーカーを送らず /echo でチャット欄に出す -> QueueMarkerCommand
 ///   v50 /mk を撃つのが誰かを 1 つのモードにして排他にする (Off / 各自 / マスター)
 ///                                                       -> Config.MarkerPlacement
+///   v51 優先順位リストのプリセットに「ヒーラー優先」を追加 -> DrawAssignmentSettings
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -292,7 +293,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(50, "Garume, Redmoon");
+    public override Metadata Metadata => new(51, "Garume, Redmoon");
 
     #endregion
 
@@ -685,6 +686,40 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
                 C.FirstOrbRole = (FirstOrbRole)Math.Clamp(firstOrbRole, 0, FirstOrbRoleNames.Length - 1);
         }
 
+        DrawFixedMarkerSettings();
+
+        if (C.AssignmentMode is AssignmentMode.Priority)
+        {
+            // 並び順がそのままグループ内の順位になり、順位 0 の人がそのグループの
+            // マーカー 1 番を取る。どのグループに入るかはデバフ任せなので、
+            // 「必ず早い窓で線を取る」までは決められない。
+            if (ImGui.Button("Apply Meow static TN priority"))
+                C.PriorityData = CreatePriorityData("P3 Earthquake Meow static TN priority",
+                    "M1 - M2 - R1 - R2 - MT - OT - H1 - H2.",
+                    [
+                        RolePosition.M1, RolePosition.M2, RolePosition.R1, RolePosition.R2,
+                        RolePosition.T1, RolePosition.T2, RolePosition.H1, RolePosition.H2
+                    ]);
+            if (ImGui.Button("Apply healers first priority"))
+                C.PriorityData = CreatePriorityData("P3 Earthquake healers first priority",
+                    "H1 - H2 - MT - OT - M1 - M2 - R1 - R2. Healers take rank 0 in whichever group "
+                    + "they land in, so they get marker 1 there.",
+                    [
+                        RolePosition.H1, RolePosition.H2, RolePosition.T1, RolePosition.T2,
+                        RolePosition.M1, RolePosition.M2, RolePosition.R1, RolePosition.R2
+                    ]);
+            C.PriorityData.Draw();
+        }
+
+        DrawBlackHoleSettings();
+        ImGui.Unindent();
+    }
+
+    /// <summary>マーカー位置を固定する 2 つの割り当てモードの設定。</summary>
+    /// <remarks>呼び出しは 1 か所だけだが、畳むと DrawAssignmentSettings が 100 行を超えるので分けてある。
+    /// 2 モードは排他なので if/else のまま 1 つにまとめている。</remarks>
+    private void DrawFixedMarkerSettings()
+    {
         if (C.AssignmentMode is AssignmentMode.FixedRoleAccretion)
         {
             ImGui.TextUnformatted("DPS/Support/Accretion spot assignment");
@@ -728,21 +763,6 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
                 ImGui.TextWrapped("Warning: DPS, Support, Accretion, and Flex markers should be unique.");
             ImGui.Unindent();
         }
-
-        if (C.AssignmentMode is AssignmentMode.Priority)
-        {
-            if (ImGui.Button("Apply Meow static TN priority"))
-                C.PriorityData = CreatePriorityData("P3 Earthquake Meow static TN priority",
-                    "M1 - M2 - R1 - R2 - MT - OT - H1 - H2.",
-                    [
-                        RolePosition.M1, RolePosition.M2, RolePosition.R1, RolePosition.R2,
-                        RolePosition.T1, RolePosition.T2, RolePosition.H1, RolePosition.H2
-                    ]);
-            C.PriorityData.Draw();
-        }
-
-        DrawBlackHoleSettings();
-        ImGui.Unindent();
     }
 
     private void DrawFinalRolePositionSettings()
