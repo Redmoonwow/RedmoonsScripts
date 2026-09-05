@@ -50,6 +50,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
 ///   v54 ギミック終了とリセットで、マスターが置いたマーカーを消す -> ExecutePendingMasterClear
 ///   v55 終盤の基準方向を、ロール散開・塔・突出せよでも凍結値に揃える -> FinalPairAnchorAngle
+///   v56 診断用ログを主要な決定点に入れる (C.VerboseLog で切替) -> Log
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
@@ -316,7 +317,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(55, "Garume, Redmoon");
+    public override Metadata Metadata => new(56, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -876,6 +877,8 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         ImGui.Separator();
         if (!ImGui.CollapsingHeader("Debug status")) return;
 
+        ImGui.Checkbox("Verbose debug log", ref C.VerboseLog);
+
         if (ImGui.BeginTabBar("P3EarthquakeDebug"))
         {
             if (ImGui.BeginTabItem("Status"))
@@ -960,7 +963,10 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         }
 
         if (_state == State.Idle)
+        {
             _state = State.CollectingAssignments;
+            Log("StartCollection: 割り当て収集へ");
+        }
     }
 
     private void StartBlackHole()
@@ -1019,14 +1025,28 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         }
     }
 
+    /// <summary>診断用の 1 行ログ。<c>C.VerboseLog</c> が ON のときだけ出る。</summary>
+    /// <remarks>行頭に窓番号と状態を必ず付ける。8 人ぶんのログを突き合わせるとき、
+    /// 「どのクライアントがどの時点で何を見ていたか」が並べられないと原因に辿り着けないため。
+    /// 毎フレーム呼ばれる場所には置かない。状態が変わった瞬間だけを残す。</remarks>
+    private void Log(string message)
+    {
+        if (!C.VerboseLog) return;
+        PluginLog.Information($"[P3EQ w{_currentWindow} {_state}/{_finalStage}] {message}");
+    }
     private void ResolveSelfSlot()
     {
         var me = BasePlayer;
         if (me == null || _selfSlot != Slot.None || !_groups.ContainsKey(me.EntityId)) return;
         if (TryResolveSlot(me, out _selfSlot, out _quality))
+        {
             _instruction = "";
+            Log($"ResolveSelfSlot: slot={_selfSlot} src={_quality} mode={C.AssignmentMode} groups={_groups.Count}");
+        }
         else
+        {
             _instruction = TextOrEmpty(C.ShowUnknownSlotText, C.UnknownSlotText);
+        }
     }
 
     private void ClearSelfResolution()
@@ -1047,6 +1067,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         if (_state is not (State.CollectingAssignments or State.BlackHoleActive))
             return;
 
+        Log($"InvalidateMarkerResolution: マーカーが動いたので slot={_selfSlot} を捨てて解き直す");
         _selfSlot = Slot.None;
         _quality = AssignmentQuality.Unknown;
     }
@@ -1215,7 +1236,11 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         if (_windowOrderAnchorAngle is null &&
             C.BlackHoleOrderAnchor == BlackHoleOrderAnchor.KefkaPosition &&
             TryGetKefkaPosition(out var kefka))
+        {
             _windowOrderAnchorAngle = DirectionAngle(kefka);
+            Log($"freeze orderAnchor={Deg(_windowOrderAnchorAngle.Value):F1} " +
+                $"kefka=({kefka.X:F1},{kefka.Z:F1}) src={_kefkaAnchorDebug} tethers={_tetherTargets.Count}");
+        }
 
         // 2 本目の窓: 攻撃 1 に近い方を攻撃 1、残りを攻撃 2。攻撃 1 は 1 本目の反時計側で
         // 待機しているので、線が 2 本そろった瞬間の位置で決めれば戦略と一致する。
@@ -1252,6 +1277,9 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             .ThenBy(activeBucket => activeBucket)
             .First();
         _windowFirstPair = (first, activeBuckets.First(activeBucket => activeBucket != first));
+        Log($"freeze firstPair A1={DirectionName(_windowFirstPair.Value.First)} " +
+            $"A2={DirectionName(_windowFirstPair.Value.Second)} by={firstPlayer.Name} " +
+            $"at=({firstPosition.X:F1},{firstPosition.Z:F1})");
     }
 
     private void CacheLiveBlackHoleActors()
@@ -1564,6 +1592,9 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         }
 
         _hitSources.Add(sourceBucket);
+        Log($"hit {DirectionName(sourceBucket)} {_hitSources.Count}/{ExpectedSourcesByWindow[_currentWindow]} " +
+            $"expected={DirectionName(expected)} self={DirectionName(_selfTetherBucket)} slot={_selfSlot} " +
+            $"done={_selfCompletedWindow == _currentWindow}");
         if (_hitSources.Count < ExpectedSourcesByWindow[_currentWindow]) return;
 
         if (_selfTetherBucket >= 0 && _hitSources.Contains(_selfTetherBucket))
@@ -1571,6 +1602,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         _hitSources.Clear();
         ClearCurrentWindowTethers();
         _currentWindow++;
+        Log($"窓を進めた -> w{_currentWindow}");
         if (_currentWindow > 9)
             EnterFinalSequence();
     }
@@ -1579,9 +1611,16 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     {
         if (_state == State.Completed) return;
 
+        var wasFinal = _state == State.FinalSequence;
         _state = State.FinalSequence;
         if (_finalStage == FinalStage.None)
             _finalStage = FinalStage.AwaitingBlizzaga;
+        if (!wasFinal)
+        {
+            var anchorText = _finalAnchorAngle is { } a ? $"{Deg(a):F1}" : "-";
+            Log($"EnterFinalSequence: anchor={anchorText} ownRole={OwnFinalStackRole()} " +
+                $"first={_firstFinalStackRole} second={_secondFinalStackRole}");
+        }
         _currentWindow = Math.Max(_currentWindow, 10);
         _instruction = "";
         ClearSelfTether(false);
@@ -1693,6 +1732,9 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         if (stackRole == FinalStackRole.Unknown)
             return;
         _finalStackMarkerCount++;
+        var which = _firstFinalStackRole == FinalStackRole.Unknown ? "first"
+            : _secondFinalStackRole == FinalStackRole.Unknown ? "second" : "extra(無視)";
+        Log($"RecordFinalStackRole: {which}={stackRole} count={_finalStackMarkerCount}");
         if (_firstFinalStackRole == FinalStackRole.Unknown)
             _firstFinalStackRole = stackRole;
         else if (_secondFinalStackRole == FinalStackRole.Unknown)
@@ -1725,7 +1767,15 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         if (_firstFinalStackRole == FinalStackRole.Unknown)
             _firstFinalStackRole = stackRole;
 
+        // ここで見る OwnFinalStackRole は毎回引き直しになっている。優先順位リストが一瞬
+        // 引けないと戦闘職ロールへ落ちて、頭割りと塔が入れ替わる。ログに両方を残しておく。
         var ownStackRole = OwnFinalStackRole();
+        var hasConfigured = TryGetOwnRolePosition(out var loggedRole);
+        Log($"SetFinalLanding: stack={stackRole} own={ownStackRole} " +
+            $"configured={(hasConfigured ? loggedRole.ToString() : "none")} " +
+            $"landings={_landingCount} towers={_finalTowerPositions.Count} -> " +
+            $"{(ownStackRole == stackRole ? "中央で頭割り" : "塔")}");
+
         if (ownStackRole == stackRole)
         {
             SetGuide(Center, TextOrEmpty(C.ShowFinalStackText, C.FinalStackText), GuidanceKind.FinalLanding,
@@ -1736,6 +1786,8 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         if (TryGetOwnRolePosition(out var role))
         {
             var destination = FinalTowerPosition(role);
+            Log($"tower target role={role} anchor={Deg(FinalPairAnchorAngle()):F1} " +
+                $"observed={_finalTowerPositions.Count} dest=({destination.X:F1},{destination.Z:F1})");
             SetGuide(destination, TextOrEmpty(C.ShowFinalTowerText, C.FinalTowerText, RolePairName(role)),
                 GuidanceKind.FinalLanding, LandingCast, 0.0f, 0.0f);
         }
@@ -1767,6 +1819,8 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
 
     private void Complete()
     {
+        Log($"Complete: slot={_selfSlot} src={_quality} landings={_landingCount} " +
+            $"stackMarkers={_finalStackMarkerCount} dondoko={_finalDondokoHitCount} towers={_finalTowerPositions.Count}");
         _state = State.Completed;
         ClearMechanicState(clearSlot: false);
         HideElements();
@@ -2048,10 +2102,13 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             return;
 
         _finalTowerPositions.Add(position);
-        if (_guideKind == GuidanceKind.FinalLanding &&
+        var rebuild = _guideKind == GuidanceKind.FinalLanding &&
             _currentFinalStackRole != FinalStackRole.Unknown &&
             TryGetOwnRolePosition(out _) &&
-            OwnFinalStackRole() != _currentFinalStackRole)
+            OwnFinalStackRole() != _currentFinalStackRole;
+        Log($"tower#{_finalTowerPositions.Count} ({position.X:F1},{position.Z:F1}) " +
+            $"@{Deg(DirectionAngle(position)):F0} r={distance:F1} action={actionId} from={origin} rebuild={rebuild}");
+        if (rebuild)
             SetFinalLanding(_currentFinalStackRole);
     }
 
@@ -3044,6 +3101,9 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         public FinalInitialNorthRole FinalInitialNorthRole = FinalInitialNorthRole.Support;
         public bool BlackHoleTetherOnly;
         public bool ShowPostBlackHoleNavigation = true;
+        // 診断用ログ。状態が変わった瞬間だけを Dalamud のログに残す。
+        // 8 人ぶんを突き合わせて原因を追うためのものなので、既定は ON。
+        public bool VerboseLog = true;
         public uint RainbowNavigationColor1 = WithDefaultAlpha(EColor.CyanBright).ToUint();
         public uint RainbowNavigationColor2 = WithDefaultAlpha(EColor.VioletBright).ToUint();
         public uint CorrectTetherColor = WithDefaultAlpha(EColor.GreenBright).ToUint();
