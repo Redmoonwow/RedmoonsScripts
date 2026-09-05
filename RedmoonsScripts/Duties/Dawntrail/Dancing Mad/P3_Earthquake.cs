@@ -33,7 +33,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// それ以外の振る舞いは上流のまま。
 ///   v42 頭上マーカーがラグで遅れたときの誤判定を直す  -> InvalidateMarkerResolution
 ///   v43 マスターが優先順位リストから 8 人分のマーカーを置く -> TryPlaceMasterMarkers
-///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalInitialAnchorAngle
+///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalAnchorAngle
 ///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
 ///                                                       -> FreezeWindowDecisions
 ///   v49 リプレイ中は自分用マーカーを送らず /echo でチャット欄に出す -> QueueMarkerCommand
@@ -43,6 +43,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v52 マスターが誰にどのスロットを割り当てたかを /echo で残す -> TryPlaceMasterMarkers
 ///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
 ///   v54 ギミック終了とリセットで、マスターが置いたマーカーを消す -> ExecutePendingMasterClear
+///   v55 終盤の基準方向を、ロール散開・塔・突出せよでも凍結値に揃える -> FinalPairAnchorAngle
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -240,8 +241,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     // ---- ClearMechanicState が終盤ぶんとして戻す -------------------------------
     private FinalStage _finalStage;                    // 終盤の細分状態
     // CenterBait 突入時に凍結する誘導の材料。null / Unknown のあいだは未凍結。
-    // なぜ凍結するかは FreezeFinalInitialAnchorAngle を参照。
-    private float? _finalInitialAnchorAngle;           // 凍結したケフカの向き (rad)
+    // なぜ凍結するかは FreezeFinalAnchorAngle を参照。
+    private float? _finalAnchorAngle;           // 凍結したケフカの向き (rad)
     private FinalStackRole _finalInitialStackRole;     // 凍結した自分の頭割りロール
     private uint _finalInitialRoleOwner;               // 上の値が誰のものか。BasePlayer 差し替え検出用
     private FinalStackRole _firstFinalStackRole;       // 1 回目の頭割りロール
@@ -299,7 +300,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(54, "Garume, Redmoon");
+    public override Metadata Metadata => new(55, "Garume, Redmoon");
 
     #endregion
 
@@ -410,7 +411,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             _finalStage = FinalStage.CenterBait;
             // ロールが取れるかどうかに関わらず、CenterBait に入ったこの瞬間のケフカの向きを確定させる。
             // 後からロールが解決したとき、そのときのケフカ位置ではなく突入時の向きを使わせるため。
-            FreezeFinalInitialAnchorAngle();
+            FreezeFinalAnchorAngle();
             if (TryGetFinalInitialBaitGuide(out var destination, out var text))
                 SetGuide(destination, text, GuidanceKind.FinalCenter, LateP3Blizzaga, 0.0f, 0.0f);
             else
@@ -1094,7 +1095,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
         // CenterBait の凍結状態。anchor が "-" ならケフカ位置が取れておらず北向き固定、
         // role が "-" なら優先順位リストから引けておらず戦闘職ロールで表示している。
-        var frozen = (_finalInitialAnchorAngle is { } frozenAngle ? $"anchor {Deg(frozenAngle):F1}" : "anchor -") +
+        var frozen = (_finalAnchorAngle is { } frozenAngle ? $"anchor {Deg(frozenAngle):F1}" : "anchor -") +
                      (_finalInitialStackRole == FinalStackRole.Unknown
                          ? " role -"
                          : $" role {_finalInitialStackRole} owner {Describe(_finalInitialRoleOwner)}");
@@ -1942,13 +1943,13 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             ? FinalStackRole.Support
             : FinalStackRole.Dps;
         var goNorth = ownStackRole == northRole;
-        var angle = NormalizeAngle(FreezeFinalInitialAnchorAngle() + (goNorth ? 0.0f : MathF.PI));
+        var angle = NormalizeAngle(FreezeFinalAnchorAngle() + (goNorth ? 0.0f : MathF.PI));
         destination = PositionFromDirectionAngle(angle, 5.5f);
         text = TextOrEmpty(C.ShowFinalRoleSplitText, C.FinalRoleSplitText, ownStackRole == FinalStackRole.Support ? "Support" : "DPS");
         return true;
     }
 
-    /// <summary>CenterBait の基準となるケフカの向きを、突入時の値で確定させる。</summary>
+    /// <summary>終盤の基準となるケフカの向きを、ブリザガ詠唱を見た瞬間の値で確定させる。</summary>
     /// <remarks>CenterBait の誘導位置は「ケフカの向き」と「自分のロール」の 2 つだけで決まる。
     /// どちらも実行中に値が動くため、凍結しないと同じ CenterBait のあいだに位置が飛ぶ。
     ///
@@ -1962,9 +1963,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     ///
     /// 値が取れないうちは凍結しない。北向き固定という当てずっぽうを latch すると二度と
     /// 直せなくなるので、確かな値が来た最初の 1 回だけを確定させる。</remarks>
-    private float FreezeFinalInitialAnchorAngle()
+    private float FreezeFinalAnchorAngle()
     {
-        if (_finalInitialAnchorAngle is { } frozen)
+        if (_finalAnchorAngle is { } frozen)
             return frozen;
 
         // ケフカ位置が無いあいだは KefkaAnchorAngle() と同じく北 (0 度) を返すだけで凍結しない。
@@ -1972,7 +1973,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             return 0.0f;
 
         var angle = DirectionAngle(kefka);
-        _finalInitialAnchorAngle = angle;
+        _finalAnchorAngle = angle;
         return angle;
     }
 
@@ -2107,7 +2108,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
         // 終盤シーケンス
         _finalStage = FinalStage.None;
-        _finalInitialAnchorAngle = null;
+        _finalAnchorAngle = null;
         _finalInitialStackRole = FinalStackRole.Unknown;
         _finalInitialRoleOwner = 0;
         _firstFinalStackRole = FinalStackRole.Unknown;
@@ -2839,7 +2840,11 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _ => FinalStackRole.Unknown
     };
 
-    private float FinalPairAnchorAngle() => KefkaAnchorAngle();
+    // 終盤の基準方向。CenterBait でブリザガ詠唱を見た瞬間に凍結した向きを、ロール散開・塔・
+    // 突出せよでも使い回す。攻略が「デカいケフカの足を見て北を判断し」と言っているのがまさに
+    // その瞬間なので、終盤のあいだ基準は 1 つで動かないのが正しい。
+    // 凍結できていなければ従来どおり現在位置から引く (当てずっぽうを固定しない)。
+    private float FinalPairAnchorAngle() => _finalAnchorAngle ?? KefkaAnchorAngle();
 
     private static string RolePairName(RolePosition role) => role switch
     {

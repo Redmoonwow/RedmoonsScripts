@@ -39,7 +39,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 上流 v41 からの差分:
 ///   v42 頭上マーカーがラグで遅れたときの誤判定を直す  -> InvalidateMarkerResolution
 ///   v43 マスターが優先順位リストから 8 人分のマーカーを置く -> TryPlaceMasterMarkers
-///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalInitialAnchorAngle
+///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalAnchorAngle
 ///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
 ///                                                       -> FreezeWindowDecisions
 ///   v49 リプレイ中は自分用マーカーを送らず /echo でチャット欄に出す -> QueueMarkerCommand
@@ -49,6 +49,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v52 マスターが誰にどのスロットを割り当てたかを /echo で残す -> TryPlaceMasterMarkers
 ///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
 ///   v54 ギミック終了とリセットで、マスターが置いたマーカーを消す -> ExecutePendingMasterClear
+///   v55 終盤の基準方向を、ロール散開・塔・突出せよでも凍結値に揃える -> FinalPairAnchorAngle
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
@@ -296,8 +297,8 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private int _earthMaxCount;
     private FinalStage _finalStage;
     // CenterBait 突入時に凍結する誘導の材料。null / Unknown のあいだは未凍結で、
-    // 値が取れた最初の呼び出しで確定する。理由は FreezeFinalInitialAnchorAngle を参照。
-    private float? _finalInitialAnchorAngle;
+    // 値が取れた最初の呼び出しで確定する。理由は FreezeFinalAnchorAngle を参照。
+    private float? _finalAnchorAngle;
     private FinalStackRole _finalInitialStackRole;
     private uint _finalInitialRoleOwner;
     private FinalStackRole _firstFinalStackRole;
@@ -315,7 +316,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(54, "Garume, Redmoon");
+    public override Metadata Metadata => new(55, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -1593,7 +1594,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         _finalStage = FinalStage.CenterBait;
         // ロールが取れるかどうかに関わらず、CenterBait に入ったこの瞬間のケフカの向きを確定させる。
         // 後からロールが解決したとき、そのときのケフカ位置ではなく突入時の向きを使わせるため。
-        FreezeFinalInitialAnchorAngle();
+        FreezeFinalAnchorAngle();
         if (TryGetFinalInitialBaitGuide(out var destination, out var text))
             SetGuide(destination, text, GuidanceKind.FinalCenter, LateP3Blizzaga, 0.0f, 0.0f);
         else
@@ -1621,13 +1622,14 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             ? FinalStackRole.Support
             : FinalStackRole.Dps;
         var goNorth = ownStackRole == northRole;
-        var angle = NormalizeAngle(FreezeFinalInitialAnchorAngle() + (goNorth ? 0.0f : MathF.PI));
+        var angle = NormalizeAngle(FreezeFinalAnchorAngle() + (goNorth ? 0.0f : MathF.PI));
         destination = PositionFromDirectionAngle(angle, FinalInitialSplitRadius);
         text = TextOrEmpty(C.ShowFinalRoleSplitText, C.FinalRoleSplitText, ownStackRole == FinalStackRole.Support ? "Support" : "DPS");
         return true;
     }
 
-    // CenterBait の誘導位置は「ケフカの向き」と「自分のロール」の 2 つだけで決まる。
+    // 終盤の誘導位置は「ケフカの向き」と「自分のロール」で決まる。向きは CenterBait だけでなく
+    // ロール散開・塔・突出せよでも使う (FinalPairAnchorAngle)。
     // どちらも実行中に値が動くため、凍結しないと同じ CenterBait のあいだに位置が飛ぶ。
     //
     //   ケフカの向き : _kefkaId が確定していると RefreshKefkaAnchorFromObject が毎フレーム
@@ -1641,9 +1643,9 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     //
     // 値が取れないうちは凍結しない。0 度や戦闘職ロールという当てずっぽうを latch すると
     // 二度と直せなくなるので、確かな値が来た最初の 1 回だけを確定させる。
-    private float FreezeFinalInitialAnchorAngle()
+    private float FreezeFinalAnchorAngle()
     {
-        if (_finalInitialAnchorAngle is { } frozen)
+        if (_finalAnchorAngle is { } frozen)
             return frozen;
 
         // ケフカ位置が無いあいだは KefkaAnchorAngle() と同じく北 (0 度) を返すだけで凍結しない。
@@ -1651,7 +1653,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             return 0.0f;
 
         var angle = DirectionAngle(kefka);
-        _finalInitialAnchorAngle = angle;
+        _finalAnchorAngle = angle;
         return angle;
     }
 
@@ -1814,7 +1816,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private void ClearFinalState()
     {
         _finalStage = FinalStage.None;
-        _finalInitialAnchorAngle = null;
+        _finalAnchorAngle = null;
         _finalInitialStackRole = FinalStackRole.Unknown;
         _finalInitialRoleOwner = 0;
         _firstFinalStackRole = FinalStackRole.Unknown;
@@ -2718,7 +2720,11 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             : _finalTowerPositions.OrderBy(position => AngleDistance(DirectionAngle(position), angle)).First();
     }
 
-    private float FinalPairAnchorAngle() => KefkaAnchorAngle();
+    // 終盤の基準方向。CenterBait でブリザガ詠唱を見た瞬間に凍結した向きを、ロール散開・塔・
+    // 突出せよでも使い回す。攻略が「デカいケフカの足を見て北を判断し」と言っているのがまさに
+    // その瞬間なので、終盤のあいだ基準は 1 つで動かないのが正しい。
+    // 凍結できていなければ従来どおり現在位置から引く (当てずっぽうを固定しない)。
+    private float FinalPairAnchorAngle() => _finalAnchorAngle ?? KefkaAnchorAngle();
 
     private string FinalPairAnchorDebugText() => $"kefka {KefkaAnchorDebugText()}";
 
@@ -2726,7 +2732,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     // ケフカ位置が取れておらず北向き固定、role が "-" のままなら優先順位リストから
     // 引けておらず戦闘職ロールのフォールバックで表示している。
     private string FinalInitialFrozenDebugText() =>
-        (_finalInitialAnchorAngle is { } angle ? $"anchor {Deg(angle):F1}" : "anchor -") +
+        (_finalAnchorAngle is { } angle ? $"anchor {Deg(angle):F1}" : "anchor -") +
         (_finalInitialStackRole == FinalStackRole.Unknown
             ? " role -"
             : $" role {_finalInitialStackRole} owner {Describe(_finalInitialRoleOwner)}");
