@@ -40,6 +40,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v50 /mk を撃つのが誰かを 1 つのモードにして排他にする (Off / 各自 / マスター)
 ///                                                       -> Config.MarkerPlacement
 ///   v51 優先順位リストのプリセットに「ヒーラー優先」を追加 -> DrawAssignmentSettings
+///   v52 マスターが誰にどのスロットを割り当てたかを /echo で残す -> TryPlaceMasterMarkers
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -293,7 +294,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(51, "Garume, Redmoon");
+    public override Metadata Metadata => new(52, "Garume, Redmoon");
 
     #endregion
 
@@ -1723,6 +1724,21 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         }
 
         _placedMasterMarkers = true;
+
+        // 誰にどのスロットを割り当てるつもりかを、名前とパーティ番号で自分のチャット欄に出す。
+        // 発行する /mk だけでは <3> のような番号しか残らず、後から誰のことか追えないため。
+        // /echo はクライアント内で完結してサーバに届かない。Splatoon のキューも通さないので、
+        // 本命の /mk を 170ms 遅らせることもない。
+        // 名前が長いと 1 行が chat の長さ上限に触るので、グループごとに 3 行へ割る。
+        foreach (var summaryGroup in order.Select(x => x.Group).Distinct().OrderBy(x => x))
+        {
+            var line = string.Join(" ", order
+                .Where(x => x.Group == summaryGroup)
+                .OrderBy(x => x.Rank)
+                .Select(x => $"{SlotName(SlotFromRank(summaryGroup, x.Rank))}=" +
+                             $"<{tags[x.EntityId]}>{x.EntityId.GetObject()?.Name.ToString() ?? "?"}"));
+            Chat.ExecuteCommand($"/echo [P3 Earthquake] {line}");
+        }
 
         if (C.IsMasterClearFirst)
             foreach (var tag in tags.Values.OrderBy(x => x))
