@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -20,9 +20,33 @@ using Splatoon.Memory;
 using Splatoon.SplatoonScripting;
 using Splatoon.SplatoonScripting.Priority;
 
-namespace SplaSim.SplatoonScripts.Duties.Dawntrail.DancingMadUltimate;
+namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 
-public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
+/// <summary>
+/// Dancing Mad (Ultimate) P3 Earthquake / Black Hole guidance — 上流の構造のままの版。
+/// </summary>
+/// <remarks>
+/// Derived from <c>SplatoonScripts/Duties/Dawntrail/Dancing Mad/P3_Earthquake.cs</c>
+/// in PunishXIV/Splatoon, originally authored by Garume (v41).
+/// Licensed under AGPL-3.0, same as the upstream repository.
+///
+/// 隣の <see cref="P3_Earthquake"/> と中身の振る舞いは同じ。違いは書き方だけ:
+///   このファイル : 上流 Garume の構造をそのまま保つ。region 無し、199 メソッド。
+///                  上流へ修正を出すときの差分がバグ修正 3 点だけで済むようにしてある。
+///   P3_Earthquake: 同じ振る舞いを自分の基準で書き直したもの。region 付き、129 メソッド、
+///                  1 か所でしか使わない定数は直書き。普段読むのはこちら。
+///
+/// 上流 v41 からの差分:
+///   v42 頭上マーカーがラグで遅れたときの誤判定を直す  -> InvalidateMarkerResolution
+///   v43 マスターが優先順位リストから 8 人分のマーカーを置く -> TryPlaceMasterMarkers
+///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalInitialAnchorAngle
+///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
+///                                                       -> FreezeWindowDecisions
+///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
+///
+/// 両方を同時に有効にすると同じギミックの誘導が二重に出る。どちらか片方だけを使うこと。
+/// </remarks>
+public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
 {
     private const uint TerritoryDancingMadUltimate = 1363;
     private const uint KefkaDataId = 19451;
@@ -210,6 +234,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private readonly Dictionary<uint, TargetGroup> _groups = [];
     private readonly Dictionary<int, uint> _tetherTargets = [];
     private readonly Dictionary<int, Vector3> _tetherSources = [];
+    // 線が出そろった瞬間に確定し、窓のあいだ動かさない値。null = 未確定。FreezeWindowDecisions 参照
+    private float? _windowOrderAnchorAngle;
+    private (int First, int Second)? _windowFirstPair;
     private readonly List<Vector3> _blackHolePositions = [];
     private readonly int[] _fixedLaneSetBuckets = [-1, -1, -1];
     private readonly HashSet<int> _hitSources = [];
@@ -243,6 +270,11 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private int _selfCompletedWindow = -1;
     private int _earthMaxCount;
     private FinalStage _finalStage;
+    // CenterBait 突入時に凍結する誘導の材料。null / Unknown のあいだは未凍結で、
+    // 値が取れた最初の呼び出しで確定する。理由は FreezeFinalInitialAnchorAngle を参照。
+    private float? _finalInitialAnchorAngle;
+    private FinalStackRole _finalInitialStackRole;
+    private uint _finalInitialRoleOwner;
     private FinalStackRole _firstFinalStackRole;
     private FinalStackRole _secondFinalStackRole;
     private FinalStackRole _currentFinalStackRole;
@@ -255,7 +287,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(43, "Garume");
+    public override Metadata Metadata => new(47, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -264,7 +296,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         {
             Enabled = false,
             radius = 1.25f,
-            thicc = 5.0f,
+            thicc = 15.0f,
             fillIntensity = 0.25f,
             color = C.RainbowNavigationColor1,
             tether = true,
@@ -287,7 +319,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         {
             Enabled = false,
             radius = 0,
-            thicc = 5.0f,
+            thicc = 15.0f,
             color = C.WrongTetherColor
         });
     }
@@ -773,12 +805,17 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ImGui.Indent();
         ImGui.TextUnformatted($"State={_state} Window={_currentWindow} Slot={_selfSlot} Source={_quality} Guide={_guideKind}");
         ImGui.TextUnformatted($"BlackHoleOrder={C.BlackHoleSourceOrder} Anchor={BlackHoleOrderAnchorDebugText()}");
+        // 窓ごとの凍結。anchor が "-" なら線がそろう前かケフカ未捕捉、firstPair が "-" なら未決定
+        ImGui.TextUnformatted("WindowFrozen=" +
+            $"anchor {(_windowOrderAnchorAngle is { } frozenAnchor ? $"{Deg(frozenAnchor):F1}" : "-")} " +
+            $"firstPair {(_windowFirstPair is { } pair ? $"A1={DirectionName(pair.First)} A2={DirectionName(pair.Second)}" : "-")}");
         ImGui.TextWrapped($"BlackHoleExpected={BlackHoleExpectedDebugText("settings")}");
         ImGui.TextWrapped($"BlackHoleActors={BlackHoleActorDebugText()}");
         ImGui.TextWrapped($"TetherHolders={TetherHolderDebugText()}");
         ImGui.TextWrapped($"KefkaCandidates={KefkaCandidateText()}");
         ImGui.TextUnformatted($"Final={_finalStage} Landing={_landingCount} Markers={_finalStackMarkerCount} FirstStack={_firstFinalStackRole} SecondStack={_secondFinalStackRole} CurrentStack={_currentFinalStackRole}");
         ImGui.TextUnformatted($"FinalDondokoHits={_finalDondokoHitCount}");
+        ImGui.TextUnformatted($"FinalInitialFrozen={FinalInitialFrozenDebugText()}");
         ImGui.TextUnformatted($"FinalPairAnchor={FinalPairAnchorDebugText()} Towers={FinalTowerDebugText()}");
         if (!string.IsNullOrWhiteSpace(_guideDebug))
             ImGui.TextUnformatted(_guideDebug);
@@ -1007,6 +1044,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _tetherTargets.Clear();
         _tetherSources.Clear();
         _selfCompletedWindow = -1;
+        _windowOrderAnchorAngle = null;
+        _windowFirstPair = null;
     }
 
     private void PollLiveBlackHoleTethers()
@@ -1022,8 +1061,68 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             CacheLiveBlackHoleTethersFrom(character);
         }
 
+        // 線がそろったこの瞬間の値で、窓のあいだ動かさないものを確定する。
+        // CacheFixedLaneSetBuckets も OrderedBuckets を通るので、その前に起点を決めておく。
+        FreezeWindowDecisions();
         CacheFixedLaneSetBuckets();
         RefreshExpectedTether();
+    }
+
+    // その窓の線が出そろった最初のフレームで、窓のあいだ動かさない値を確定する。
+    // 確定するのは 2 つ。A/B/C/D の起点 (巨大ケフカの方角) と、2 本目の窓の距離判定。
+    // どちらも材料が毎フレーム動く (ケフカの補間、攻撃 1 の移動、線の VFX の出入り) ので、
+    // 人が「線を見てケフカを見て決める」のと同じ 1 点で取り、以後は持ち回る。
+    // 窓が進めば ClearCurrentWindowTethers が捨て、次の窓で取り直す。
+    // 巨大ケフカは回と回の間に移動するので、フェーズ開始で 1 度だけ取るのでは 2 回目以降がずれる。
+    //
+    // 取れないうちは凍結しない。起点はケフカを掴めていなければ北のまま次フレームに回し、
+    // 距離判定は攻撃 1 が解決できるまで待つ。当てずっぽうを latch しないため。
+    private void FreezeWindowDecisions()
+    {
+        if (_currentWindow is < 0 or > 9) return;
+        if (_tetherTargets.Count < ExpectedSourcesByWindow[_currentWindow]) return;
+
+        // 起点: 巨大ケフカの方角。設定が盤面北なら凍結するものが無い。
+        if (_windowOrderAnchorAngle is null &&
+            C.BlackHoleOrderAnchor == BlackHoleOrderAnchor.KefkaPosition &&
+            TryGetKefkaPosition(out var kefka))
+            _windowOrderAnchorAngle = DirectionAngle(kefka);
+
+        // 2 本目の窓: 攻撃 1 に近い方を攻撃 1、残りを攻撃 2。攻撃 1 は 1 本目の反時計側で
+        // 待機しているので、線が 2 本そろった瞬間の位置で決めれば戦略と一致する。
+        if (_windowFirstPair is not null || _currentWindow != 1 ||
+            C.FirstPairAssignment != FirstPairAssignment.FirstSlotNearest)
+            return;
+
+        var activeBuckets = _tetherTargets.Keys.Where(_tetherSources.ContainsKey).ToList();
+        if (activeBuckets.Count != 2)
+            return;
+
+        IPlayerCharacter? firstPlayer = null;
+        foreach (var player in Svc.Objects.OfType<IPlayerCharacter>())
+        {
+            if (!_groups.ContainsKey(player.EntityId)) continue;
+            if (TryResolveSlot(player, out var resolved, out _) && resolved == Slot.Attack1)
+            {
+                firstPlayer = player;
+                break;
+            }
+        }
+        if (firstPlayer == null)
+            return;
+
+        var firstPosition = FlatPosition(firstPlayer.Position);
+        var first = activeBuckets
+            .OrderBy(activeBucket =>
+            {
+                var source = _tetherSources[activeBucket];
+                return Vector2.DistanceSquared(
+                    new Vector2(firstPosition.X, firstPosition.Z),
+                    new Vector2(source.X, source.Z));
+            })
+            .ThenBy(activeBucket => activeBucket)
+            .First();
+        _windowFirstPair = (first, activeBuckets.First(activeBucket => activeBucket != first));
     }
 
     private void CacheLiveBlackHoleActors()
@@ -1318,6 +1417,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     {
         EnterFinalSequence();
         _finalStage = FinalStage.CenterBait;
+        // ロールが取れるかどうかに関わらず、CenterBait に入ったこの瞬間のケフカの向きを確定させる。
+        // 後からロールが解決したとき、そのときのケフカ位置ではなく突入時の向きを使わせるため。
+        FreezeFinalInitialAnchorAngle();
         if (TryGetFinalInitialBaitGuide(out var destination, out var text))
             SetGuide(destination, text, GuidanceKind.FinalCenter, LateP3Blizzaga, 0.0f, 0.0f);
         else
@@ -1333,7 +1435,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             return true;
         }
 
-        var ownStackRole = OwnFinalStackRole();
+        var ownStackRole = FreezeFinalInitialStackRole();
         if (ownStackRole == FinalStackRole.Unknown)
         {
             destination = default;
@@ -1345,10 +1447,62 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             ? FinalStackRole.Support
             : FinalStackRole.Dps;
         var goNorth = ownStackRole == northRole;
-        var angle = NormalizeAngle(KefkaAnchorAngle() + (goNorth ? 0.0f : MathF.PI));
+        var angle = NormalizeAngle(FreezeFinalInitialAnchorAngle() + (goNorth ? 0.0f : MathF.PI));
         destination = PositionFromDirectionAngle(angle, FinalInitialSplitRadius);
         text = TextOrEmpty(C.ShowFinalRoleSplitText, C.FinalRoleSplitText, ownStackRole == FinalStackRole.Support ? "Support" : "DPS");
         return true;
+    }
+
+    // CenterBait の誘導位置は「ケフカの向き」と「自分のロール」の 2 つだけで決まる。
+    // どちらも実行中に値が動くため、凍結しないと同じ CenterBait のあいだに位置が飛ぶ。
+    //
+    //   ケフカの向き : _kefkaId が確定していると RefreshKefkaAnchorFromObject が毎フレーム
+    //                  実体の現在位置へ追従させる。詠唱が来るたび UpdateKefkaAnchor が
+    //                  実体 / クローン一致 / 回転からの仮想点へ出所を乗り換えることもある。
+    //   自分のロール : 優先順位リストから引けなかったフレームは戦闘職ロールへ落ちる。
+    //                  設定ロールと食い違う編成だと Support/DPS が入れ替わり 180 度飛ぶ。
+    //
+    // さらに詠唱通知は OnStartingCast の 2 つのオーバーロード経由で 1 回の詠唱につき 2 回
+    // 届き、しかも同一フレームとは限らない。この 2 回のあいだに上記が動くのが実害だった。
+    //
+    // 値が取れないうちは凍結しない。0 度や戦闘職ロールという当てずっぽうを latch すると
+    // 二度と直せなくなるので、確かな値が来た最初の 1 回だけを確定させる。
+    private float FreezeFinalInitialAnchorAngle()
+    {
+        if (_finalInitialAnchorAngle is { } frozen)
+            return frozen;
+
+        // ケフカ位置が無いあいだは KefkaAnchorAngle() と同じく北 (0 度) を返すだけで凍結しない。
+        if (!TryGetKefkaPosition(out var kefka))
+            return 0.0f;
+
+        var angle = DirectionAngle(kefka);
+        _finalInitialAnchorAngle = angle;
+        return angle;
+    }
+
+    // ロールは「誰の」ロールかまで込みで凍結する。リプレイの Base Player Override で
+    // 見る人が変われば別人のロールを出さなければならないため、持ち主が変わったら引き直す。
+    // 優先順位リストから引けた値だけを凍結し、戦闘職ロールのフォールバックは凍結しない。
+    // 後から優先順位リストが引けるようになったとき、そちらへ上書きできるようにするため。
+    private FinalStackRole FreezeFinalInitialStackRole()
+    {
+        var owner = BasePlayer?.EntityId ?? 0;
+        if (owner != 0 && owner == _finalInitialRoleOwner && _finalInitialStackRole != FinalStackRole.Unknown)
+            return _finalInitialStackRole;
+
+        if (TryGetOwnRolePosition(out var rolePosition))
+        {
+            var role = StackRoleFromRolePosition(rolePosition);
+            if (role != FinalStackRole.Unknown)
+            {
+                _finalInitialRoleOwner = owner;
+                _finalInitialStackRole = role;
+                return role;
+            }
+        }
+
+        return BasePlayer == null ? FinalStackRole.Unknown : StackRoleFromCombat(BasePlayer.GetRole());
     }
 
     private void SetFinalRoleSpread(uint actionId)
@@ -1478,6 +1632,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private void ClearFinalState()
     {
         _finalStage = FinalStage.None;
+        _finalInitialAnchorAngle = null;
+        _finalInitialStackRole = FinalStackRole.Unknown;
+        _finalInitialRoleOwner = 0;
         _firstFinalStackRole = FinalStackRole.Unknown;
         _secondFinalStackRole = FinalStackRole.Unknown;
         _currentFinalStackRole = FinalStackRole.Unknown;
@@ -1764,11 +1921,13 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return !float.IsNaN(offset);
     }
 
-    private float BlackHoleOrderAnchorAngle() => C.BlackHoleOrderAnchor switch
+    // 起点は窓ごとに凍結した巨大ケフカの方角 (FreezeWindowDecisions)。
+    // 線が出そろう前は今の位置、掴めていなければ北。設定が盤面北なら常に北。
+    private float BlackHoleOrderAnchorAngle() => _windowOrderAnchorAngle ?? (C.BlackHoleOrderAnchor switch
     {
         BlackHoleOrderAnchor.KefkaPosition when TryGetKefkaPosition(out var kefka) => DirectionAngle(kefka),
         _ => 0.0f
-    };
+    });
 
     private float KefkaAnchorAngle() =>
         TryGetKefkaPosition(out var kefka) ? DirectionAngle(kefka) : 0.0f;
@@ -1949,6 +2108,10 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         return rank >= 0 && rank < buckets.Count ? buckets[rank] : -1;
     }
 
+    // 2 本目の窓 (window 1) の距離判定。決めるのは FreezeWindowDecisions で、ここは確定した組を返すだけ。
+    // 戻り値 true は「この窓この slot は距離判定の担当」の意味で、未確定なら bucket は -1。
+    // -1 は期待なし = 待機表示になる。確定前に角度順の仮の答えを出すと、2 本目の線が出た瞬間に
+    // 距離の答えへ切り替わって誘導が飛ぶので、決まるまで出さない。
     private bool TryFirstPairBucket(Slot slot, out int bucket)
     {
         bucket = -1;
@@ -1956,36 +2119,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             slot is not (Slot.Attack1 or Slot.Attack2))
             return false;
 
-        var activeBuckets = _tetherTargets.Keys.Where(_tetherSources.ContainsKey).ToList();
-        if (activeBuckets.Count != 2)
-            return false;
-
-        IPlayerCharacter? firstPlayer = null;
-        foreach (var player in Svc.Objects.OfType<IPlayerCharacter>())
-        {
-            if (!_groups.ContainsKey(player.EntityId)) continue;
-            if (TryResolveSlot(player, out var resolved, out _) && resolved == Slot.Attack1)
-            {
-                firstPlayer = player;
-                break;
-            }
-        }
-
-        if (firstPlayer == null)
-            return false;
-
-        var firstPosition = FlatPosition(firstPlayer.Position);
-        var firstBucket = activeBuckets
-            .OrderBy(activeBucket =>
-            {
-                var source = _tetherSources[activeBucket];
-                return Vector2.DistanceSquared(
-                    new Vector2(firstPosition.X, firstPosition.Z),
-                    new Vector2(source.X, source.Z));
-            })
-            .ThenBy(activeBucket => activeBucket)
-            .First();
-        bucket = slot == Slot.Attack1 ? firstBucket : activeBuckets.First(activeBucket => activeBucket != firstBucket);
+        if (_windowFirstPair is { } pair)
+            bucket = slot == Slot.Attack1 ? pair.First : pair.Second;
         return true;
     }
 
@@ -2159,7 +2294,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         if (rank < 0)
             return "not-assigned-this-window";
         if (TryFirstPairBucket(slot, out var firstPairBucket))
-            return $"first-pair nearest expected={DirectionName(firstPairBucket)}";
+            return firstPairBucket < 0
+                ? "first-pair waiting (2 lines + Attack1)"
+                : $"first-pair nearest expected={DirectionName(firstPairBucket)}";
         if (C.AssignmentMode == AssignmentMode.FixedMarkerLanes)
             return FixedMarkerLaneDecisionText(slot, rank);
         if (C.AssignmentMode == AssignmentMode.FixedRoleAccretion)
@@ -2402,6 +2539,15 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private float FinalPairAnchorAngle() => KefkaAnchorAngle();
 
     private string FinalPairAnchorDebugText() => $"kefka {KefkaAnchorDebugText()}";
+
+    // CenterBait の凍結が効いているかを目で見るための行。anchor が "-" のままなら
+    // ケフカ位置が取れておらず北向き固定、role が "-" のままなら優先順位リストから
+    // 引けておらず戦闘職ロールのフォールバックで表示している。
+    private string FinalInitialFrozenDebugText() =>
+        (_finalInitialAnchorAngle is { } angle ? $"anchor {Deg(angle):F1}" : "anchor -") +
+        (_finalInitialStackRole == FinalStackRole.Unknown
+            ? " role -"
+            : $" role {_finalInitialStackRole} owner {Describe(_finalInitialRoleOwner)}");
 
     private string FinalTowerDebugText() => _finalTowerPositions.Count == 0
         ? "none"

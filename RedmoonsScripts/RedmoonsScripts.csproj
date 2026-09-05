@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
@@ -13,12 +13,6 @@
   <PropertyGroup>
     <DalamudLibPath>$(appdata)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
   </PropertyGroup>
-
-  <!-- work/ は配布しない作業用。update.csv 生成は RedmoonsScripts/ しか見ないので拾われないが、
-       型チェックだけは効かせたいのでコンパイル対象に含める。 -->
-  <ItemGroup>
-    <Compile Include="..\work\**\*.cs" />
-  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Splatoon\ECommons.IPC\ECommons.IPC\ECommons.IPC.csproj" />
