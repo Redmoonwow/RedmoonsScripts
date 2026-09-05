@@ -44,7 +44,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
 ///   v54 ギミック終了とリセットで、マスターが置いたマーカーを消す -> ExecutePendingMasterClear
 ///   v55 終盤の基準方向を、ロール散開・塔・突出せよでも凍結値に揃える -> FinalPairAnchorAngle
-///   v56 診断用ログを主要な決定点に入れる (C.VerboseLog で切替) -> Log
+///   v56 診断用ログを主要な決定点に入れる -> Log
+///   v57 ログは C.VerboseLog が ON のときだけ出す (既定 OFF) -> Log
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -301,7 +302,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(56, "Garume, Redmoon");
+    public override Metadata Metadata => new(57, "Garume, Redmoon");
 
     #endregion
 
@@ -1789,7 +1790,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         if (order.Count != 8) return;
         if (order.Select(x => (x.Group, x.Rank)).Distinct().Count() != 8)
         {
-            PluginLog.Warning("[P3_Earthquake] priority produced duplicate slots; placing nothing");
+            Log("優先順位リストがスロットを重複させたので 1 つも置かない");
             return;
         }
 
@@ -1871,7 +1872,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /// 何を送ったかは常にログに残す。8 人分がまとめて飛ぶため、後から順番を追えないと困る。</remarks>
     private void EnqueueMasterCommand(string command)
     {
-        PluginLog.Information($"[P3_Earthquake] master marker: {command}");
+        Log($"master marker: {command}");
         Controller.DangerousEnqueueCommand(command, false);
     }
 
@@ -3115,8 +3116,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         public bool BlackHoleTetherOnly;
         public bool ShowPostBlackHoleNavigation = true;
         // 診断用ログ。状態が変わった瞬間だけを Dalamud のログに残す。
-        // 8 人ぶんを突き合わせて原因を追うためのものなので、既定は ON。
-        public bool VerboseLog = true;
+        // 追いたいことがあるときだけ ON にする。既定は OFF。
+        public bool VerboseLog;
         public uint RainbowNavigationColor1 = WithDefaultAlpha(EColor.CyanBright).ToUint();
         public uint RainbowNavigationColor2 = WithDefaultAlpha(EColor.VioletBright).ToUint();
         public uint CorrectTetherColor = WithDefaultAlpha(EColor.GreenBright).ToUint();
