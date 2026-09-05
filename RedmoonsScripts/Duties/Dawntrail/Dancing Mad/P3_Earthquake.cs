@@ -36,6 +36,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalInitialAnchorAngle
 ///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
 ///                                                       -> FreezeWindowDecisions
+///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
 /// 振る舞いを変えずに region で目次を付け、下に入口からの地図を置いた。
@@ -208,6 +209,10 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private string _pendingMarkerCommand = "";  // 送信待ちのコマンド文字列
     private long _markerCommandAtMs;            // 送信予定時刻 (TickCount64)。0 なら予定なし
     private bool _pendingTargetMarkerCommand;   // 送信待ちが「対象デバフ由来」かどうか
+    // 直前にパケット経路で見た詠唱。メモリ監視経路の同じ詠唱を捨てるための照合用
+    private uint _lastPacketCastSource;         // 詠唱者の EntityId
+    private uint _lastPacketCastId;             // アクション ID
+    private long _lastPacketCastAtMs;           // 見た時刻 (TickCount64)
 
     // ---- ClearMechanicState が戻す: ギミック 1 回分 ----------------------------
     private readonly HashSet<uint> _earthPlayers = [];      // 地震デバフ保持者
@@ -282,7 +287,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(47, "Garume, Redmoon");
+    public override Metadata Metadata => new(48, "Garume, Redmoon");
 
     #endregion
 
@@ -351,6 +356,21 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private unsafe void HandleStartingCast(uint source, uint castId, string origin, PacketActorCast* packet)
     {
         RefreshBasePlayerState();
+        // 1 つの詠唱は 2 経路から届く。先にパケット (向きはサーバ値、全クライアント同一)、
+        // 次にメモリ監視 (向きはこのクライアントの補間値)。後者は前者を上書きしてしまうので、
+        // 直前にパケットで同じ詠唱を見ていればここで捨て、パケットが来なかったときだけ通す。
+        if (packet != null)
+        {
+            _lastPacketCastSource = source;
+            _lastPacketCastId = castId;
+            _lastPacketCastAtMs = Environment.TickCount64;
+        }
+        else if (source == _lastPacketCastSource && castId == _lastPacketCastId &&
+                 Environment.TickCount64 - _lastPacketCastAtMs < 500)
+        {
+            return;
+        }
+
         var packetRotation = packet == null ? (float?)null : packet->Rotation;
         UpdateKefkaAnchor(source, castId, packetRotation);
         ObserveFinalTowerSource(source.GetObject(), null, castId, origin);
@@ -1898,6 +1918,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _pendingTargetMarkerCommand = false;
         _markerCommandAtMs = 0;
         ClearMechanicState(clearSlot: true);
+        _lastPacketCastSource = 0;
+        _lastPacketCastId = 0;
+        _lastPacketCastAtMs = 0;
         HideElements();
         _state = State.Idle;
     }

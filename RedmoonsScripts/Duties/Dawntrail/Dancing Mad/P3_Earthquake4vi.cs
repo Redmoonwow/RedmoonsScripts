@@ -42,6 +42,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalInitialAnchorAngle
 ///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
 ///                                                       -> FreezeWindowDecisions
+///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
 /// 両方を同時に有効にすると同じギミックの誘導が二重に出る。どちらか片方だけを使うこと。
@@ -260,6 +261,10 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _pendingMarkerCommand = "";
     private long _markerCommandAtMs;
     private bool _pendingTargetMarkerCommand;
+    // 直前にパケット経路で見た詠唱。メモリ監視経路の同じ詠唱を捨てるための照合用
+    private uint _lastPacketCastSource;
+    private uint _lastPacketCastId;
+    private long _lastPacketCastAtMs;
     private uint _kefkaId;
     private Vector3? _kefkaPosition;
     private readonly List<Vector3> _finalTowerPositions = [];
@@ -287,7 +292,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(47, "Garume, Redmoon");
+    public override Metadata Metadata => new(48, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -347,6 +352,21 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private unsafe void HandleStartingCast(uint source, uint castId, string origin, PacketActorCast* packet)
     {
         RefreshBasePlayerState();
+        // 1 つの詠唱は 2 経路から届く。先にパケット (向きはサーバ値、全クライアント同一)、
+        // 次にメモリ監視 (向きはこのクライアントの補間値)。後者は前者を上書きしてしまうので、
+        // 直前にパケットで同じ詠唱を見ていればここで捨て、パケットが来なかったときだけ通す。
+        if (packet != null)
+        {
+            _lastPacketCastSource = source;
+            _lastPacketCastId = castId;
+            _lastPacketCastAtMs = Environment.TickCount64;
+        }
+        else if (source == _lastPacketCastSource && castId == _lastPacketCastId &&
+                 Environment.TickCount64 - _lastPacketCastAtMs < 500)
+        {
+            return;
+        }
+
         var packetRotation = packet == null ? (float?)null : packet->Rotation;
         UpdateKefkaAnchor(source, castId, packetRotation);
         ObserveFinalTowerSource(source.GetObject(), null, castId, origin);
@@ -1605,6 +1625,9 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         _pendingTargetMarkerCommand = false;
         _markerCommandAtMs = 0;
         ClearMechanicState(clearSlot: true);
+        _lastPacketCastSource = 0;
+        _lastPacketCastId = 0;
+        _lastPacketCastAtMs = 0;
         HideElements();
         _state = State.Idle;
     }
