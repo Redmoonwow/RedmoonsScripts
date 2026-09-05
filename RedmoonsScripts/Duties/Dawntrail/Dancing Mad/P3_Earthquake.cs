@@ -36,6 +36,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v44 CenterBait の誘導位置を突入時の値で凍結する    -> FreezeFinalInitialAnchorAngle
 ///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
 ///                                                       -> FreezeWindowDecisions
+///   v49 リプレイ中は自分用マーカーを送らず /echo でチャット欄に出す -> QueueMarkerCommand
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -287,7 +288,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(48, "Garume, Redmoon");
+    public override Metadata Metadata => new(49, "Garume, Redmoon");
 
     #endregion
 
@@ -1562,17 +1563,28 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /// <summary>マーカー設置コマンドを送信予約する。実際の送信は
     /// <see cref="ExecutePendingMarkerCommand"/> が遅延後に行う。
     /// 一発ガード・オプトイン・リプレイ判定をここで通す。</summary>
+    /// <remarks>リプレイ中も予約はする。遅延も本番と同じだけ待つ。違うのは送る文字列で、
+    /// <c>/echo</c> を前置してサーバへ届かない形にしてある。実際に何をいつ送るつもりだったのかを、
+    /// リプレイを見ながらチャット欄で確認できるようにするため。
+    /// マスターマーカー側は Splatoon のキューがリプレイ中は緑文字で出すので、ここでは扱わない。</remarks>
     private void QueueMarkerCommand(string command, bool targetDebuffCommand = false)
     {
         if (_sentMarkerCommand) return;
         _sentMarkerCommand = true;
-        if (!C.ExecuteMarkerCommand || Svc.Condition[ConditionFlag.DutyRecorderPlayback]) return;
-        _pendingMarkerCommand = command ?? "";
-        if (string.IsNullOrWhiteSpace(_pendingMarkerCommand))
+        if (!C.ExecuteMarkerCommand) return;
+
+        var text = command ?? "";
+        if (string.IsNullOrWhiteSpace(text))
         {
+            _pendingMarkerCommand = "";
             _pendingTargetMarkerCommand = false;
             return;
         }
+
+        // リプレイ中は実際には送らず、送るはずだった内容を /echo でチャット欄に出す。
+        // 判断は予約時に固定して文字列へ畳み込む。実行までにリプレイ状態が変わっても、
+        // 予約した時の意図と違うもの (実コマンド) に化けさせないため。
+        _pendingMarkerCommand = Svc.Condition[ConditionFlag.DutyRecorderPlayback] ? $"/echo {text}" : text;
         _pendingTargetMarkerCommand = targetDebuffCommand;
 
         // 0.1〜0.8 秒のランダム遅延。8 クライアントが同時に撃つのを散らすため。
@@ -1595,8 +1607,15 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         _pendingMarkerCommand = "";
         _pendingTargetMarkerCommand = false;
         _markerCommandAtMs = 0;
-        if (!string.IsNullOrWhiteSpace(command) && !Svc.Condition[ConditionFlag.DutyRecorderPlayback])
-            Chat.ExecuteCommand(command);
+        if (string.IsNullOrWhiteSpace(command)) return;
+
+        // 予約時にリプレイなら /echo へ倒してある。ここへ実コマンドのまま来るのは、
+        // 予約した後にリプレイが始まった場合だけ。その 1 通りだけを最後に弾く。
+        if (Svc.Condition[ConditionFlag.DutyRecorderPlayback] &&
+            !command.StartsWith("/echo ", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        Chat.ExecuteCommand(command);
     }
 
     /// <summary>優先順位リストから 8 人分の頭上マーカーを置く。PartyMarker モードが読む配置を
