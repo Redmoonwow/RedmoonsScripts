@@ -48,6 +48,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v51 優先順位リストのプリセットに「ヒーラー優先」を追加 -> DrawAssignmentSettings
 ///   v52 マスターが誰にどのスロットを割り当てたかを /echo で残す -> TryPlaceMasterMarkers
 ///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
+///   v54 ギミック終了とリセットで、マスターが置いたマーカーを消す -> ExecutePendingMasterClear
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
@@ -307,11 +308,14 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private int _finalDondokoHitCount;
     private bool _sentMarkerCommand;
     private bool _placedMasterMarkers;
+    // マスターが置いたマーカーの消去待ち。どの Clear でも戻さない。
+    // ClearMechanicState が立て、OnUpdate の ExecutePendingMasterClear が消費する。
+    private bool _pendingMasterClear;
     private bool _selfHadAccretionMarkerBlock;
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(53, "Garume, Redmoon");
+    public override Metadata Metadata => new(54, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -549,6 +553,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     {
         RefreshBasePlayerState();
         ExecutePendingMarkerCommand();
+        ExecutePendingMasterClear();
         TryPlaceMasterMarkers();
 
         HideElements();
@@ -1412,6 +1417,23 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         }
     }
 
+    /// <summary>予約されていれば、マスターが置いた頭上マーカーを 8 人分消す。</summary>
+    /// <remarks>ギミックが終わったとき (<c>Complete</c>) と、リセット全般 (戦闘開始・終了・全滅・
+    /// ディレクタ更新) の両方から予約が入る。どちらも <see cref="ClearMechanicState"/> を通るため、
+    /// 予約はそこ 1 か所で立てている。
+    ///
+    /// 実際に置いた回だけ走る。何も置いていないのに毎プル開始で 8 本撃つのを避けるため。
+    /// 送信は Splatoon のキュー経由なので 170ms 間隔が守られ、リプレイ中は送らず緑文字で出る。</remarks>
+    private void ExecutePendingMasterClear()
+    {
+        if (!_pendingMasterClear) return;
+        _pendingMasterClear = false;
+        if (C.MarkerPlacement != MarkerPlacement.Master) return;
+
+        for (var i = 1; i <= 8; i++)
+            EnqueueMasterCommand(string.Format(C.IsMasterClearCommand, i));
+    }
+
     // Splatoon's own queue handles the replay guard, the 170ms spacing between messages and the
     // cancellation on reset, so none of that is repeated here.
     // EntityId から <1>..<8> のパーティ番号を引く。範囲外や解決できない場合は -1。
@@ -1766,6 +1788,11 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
 
     private void ClearMechanicState(bool clearSlot)
     {
+        // 置いたものが残っているなら消去を予約する。ここから直接送ってはいけない。
+        // OnReset は script.OnReset() の直後に Controller.CancelQueuedCommands() を呼ぶので、
+        // この場で積んだコマンドはそのまま破棄される。次の OnUpdate まで持ち越す。
+        if (_placedMasterMarkers)
+            _pendingMasterClear = true;
         _placedMasterMarkers = false;
         _earthPlayers.Clear();
         _accretionPlayers.Clear();

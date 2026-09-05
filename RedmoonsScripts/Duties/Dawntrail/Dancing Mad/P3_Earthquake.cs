@@ -42,6 +42,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v51 優先順位リストのプリセットに「ヒーラー優先」を追加 -> DrawAssignmentSettings
 ///   v52 マスターが誰にどのスロットを割り当てたかを /echo で残す -> TryPlaceMasterMarkers
 ///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
+///   v54 ギミック終了とリセットで、マスターが置いたマーカーを消す -> ExecutePendingMasterClear
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -232,6 +233,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private int _currentWindow = -1;             // 現在のブラックホールウィンドウ 0..9。-1 = 未開始
     private bool _selfHadAccretionMarkerBlock;   // Accretion によりマーカー送信を抑止したか
     private bool _placedMasterMarkers;           // マスターが 8 人分のマーカーを置いたか。一発ガード
+    // マスターが置いたマーカーの消去待ち。どの Clear でも戻さない。
+    // ClearMechanicState が立て、OnUpdate の ExecutePendingMasterClear が消費する。
+    private bool _pendingMasterClear;
 
     // ---- ClearMechanicState が終盤ぶんとして戻す -------------------------------
     private FinalStage _finalStage;                    // 終盤の細分状態
@@ -295,7 +299,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(53, "Garume, Redmoon");
+    public override Metadata Metadata => new(54, "Garume, Redmoon");
 
     #endregion
 
@@ -564,6 +568,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     {
         RefreshBasePlayerState();
         ExecutePendingMarkerCommand();
+        ExecutePendingMasterClear();
         TryPlaceMasterMarkers();
 
         HideElements();
@@ -1814,6 +1819,23 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         }
     }
 
+    /// <summary>予約されていれば、マスターが置いた頭上マーカーを 8 人分消す。</summary>
+    /// <remarks>ギミックが終わったとき (<c>Complete</c>) と、リセット全般 (戦闘開始・終了・全滅・
+    /// ディレクタ更新) の両方から予約が入る。どちらも <see cref="ClearMechanicState"/> を通るため、
+    /// 予約はそこ 1 か所で立てている。
+    ///
+    /// 実際に置いた回だけ走る。何も置いていないのに毎プル開始で 8 本撃つのを避けるため。
+    /// 送信は Splatoon のキュー経由なので 170ms 間隔が守られ、リプレイ中は送らず緑文字で出る。</remarks>
+    private void ExecutePendingMasterClear()
+    {
+        if (!_pendingMasterClear) return;
+        _pendingMasterClear = false;
+        if (C.MarkerPlacement != MarkerPlacement.Master) return;
+
+        for (var i = 1; i <= 8; i++)
+            EnqueueMasterCommand(string.Format(C.IsMasterClearCommand, i));
+    }
+
     /// <summary>マスターのコマンドを Splatoon のキューに積む。</summary>
     /// <remarks>リプレイ判定・メッセージ間 170ms の間隔・リセット時のキャンセルは
     /// <c>DangerousEnqueueCommand</c> 側が面倒を見るので、ここでは繰り返さない。
@@ -2068,6 +2090,11 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
     private void ClearMechanicState(bool clearSlot)
     {
+        // 置いたものが残っているなら消去を予約する。ここから直接送ってはいけない。
+        // OnReset は script.OnReset() の直後に Controller.CancelQueuedCommands() を呼ぶので、
+        // この場で積んだコマンドはそのまま破棄される。次の OnUpdate まで持ち越す。
+        if (_placedMasterMarkers)
+            _pendingMasterClear = true;
         _placedMasterMarkers = false;
         _earthPlayers.Clear();
         _accretionPlayers.Clear();
