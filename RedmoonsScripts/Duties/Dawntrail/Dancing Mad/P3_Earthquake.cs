@@ -41,6 +41,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///                                                       -> Config.MarkerPlacement
 ///   v51 優先順位リストのプリセットに「ヒーラー優先」を追加 -> DrawAssignmentSettings
 ///   v52 マスターが誰にどのスロットを割り当てたかを /echo で残す -> TryPlaceMasterMarkers
+///   v53 Debug をタブに分け、パーティ番号の解決先を一覧にする -> DrawPartyNumberTab
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -294,7 +295,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(52, "Garume, Redmoon");
+    public override Metadata Metadata => new(53, "Garume, Redmoon");
 
     #endregion
 
@@ -970,6 +971,61 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ImGui.Separator();
         if (!ImGui.CollapsingHeader("Debug status")) return;
 
+        if (ImGui.BeginTabBar("P3EarthquakeDebug"))
+        {
+            if (ImGui.BeginTabItem("Status"))
+            {
+                DrawDebugStatusTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Party numbers"))
+            {
+                DrawPartyNumberTab();
+                ImGui.EndTabItem();
+            }
+            ImGui.EndTabBar();
+        }
+    }
+
+    /// <summary>&lt;1&gt; - &lt;8&gt; がいま誰に解決されるかの一覧。</summary>
+    /// <remarks>マスターの /mk はこの番号で撃つので、番号と人の対応が狂っていれば
+    /// マーカーは全員ぶんずれる。<c>TryPlaceMasterMarkers</c> と同じ引き方をしている。
+    /// duty recorder 再生中はオブジェクトテーブル順で返るため、実プレイのパーティ番号とは
+    /// 一致しない。リプレイで番号がずれて見えるのは正常。</remarks>
+    private void DrawPartyNumberTab()
+    {
+        ImGui.TextWrapped(InternationalString.Print(
+            en: "Who each party placeholder resolves to right now. The master issues its /mk with "
+                + "these numbers. During duty replay these come back in object table order, so they "
+                + "do not match the real party numbers.",
+            jp: "パーティ番号がいま誰に解決されるか。マスターはこの番号で /mk を撃つ。"
+                + "duty recorder 再生中はオブジェクトテーブル順で返るため、"
+                + "実プレイのパーティ番号とは一致しない。"));
+        ImGui.Separator();
+
+        var self = BasePlayer?.EntityId ?? 0;
+        for (var i = 1; i <= 8; i++)
+        {
+            var resolved = FakePronoun.Resolve($"<{i}>");
+            if (resolved == null)
+            {
+                ImGui.TextUnformatted($"<{i}> = none");
+                continue;
+            }
+
+            var entityId = resolved->EntityId;
+            var obj = entityId.GetObject();
+            var group = _groups.GetValueOrDefault(entityId);
+            var mark = entityId == self ? " *self" : "";
+            ImGui.TextUnformatted(
+                $"<{i}> = {obj?.Name.ToString() ?? "?"} (0x{entityId:X8}) group={group}{mark}");
+        }
+    }
+
+    /// <summary>Debug status タブの中身。</summary>
+    /// <remarks>呼び出しは 1 か所だけだが、畳むと DrawDebugStatus が 100 行を超えるので分けてある。</remarks>
+    private void DrawDebugStatusTab()
+    {
         // ブラックホールの並び順の起点。ケフカを掴めていなければ北に落ちている。
         var orderAnchor = C.BlackHoleOrderAnchor switch
         {
