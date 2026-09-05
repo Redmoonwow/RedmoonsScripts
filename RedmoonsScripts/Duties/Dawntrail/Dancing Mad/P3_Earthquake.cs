@@ -37,6 +37,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v47 A/B/C/D の起点と 2 本目の距離判定を、線が出そろった瞬間で窓ごとに凍結する
 ///                                                       -> FreezeWindowDecisions
 ///   v49 リプレイ中は自分用マーカーを送らず /echo でチャット欄に出す -> QueueMarkerCommand
+///   v50 /mk を撃つのが誰かを 1 つのモードにして排他にする (Off / 各自 / マスター)
+///                                                       -> Config.MarkerPlacement
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -153,6 +155,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private static readonly string[] FinalInitialBaitModeNames = ["Center", "Kefka-relative N/S"];
     private static readonly string[] FinalNorthRoleNames = ["Support", "DPS"];
     private static readonly string[] MarkerCommandSourceNames = ["Target debuff", "Accretion debuff"];
+    private static readonly string[] MarkerPlacementNames =
+        ["Off", "Each player marks themselves", "Master marks everyone"];
     private static readonly AssignmentMode[] AssignmentModeValues =
     [
         AssignmentMode.PartyMarker,
@@ -288,7 +292,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(49, "Garume, Redmoon");
+    public override Metadata Metadata => new(50, "Garume, Redmoon");
 
     #endregion
 
@@ -832,39 +836,64 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             en: "Optional self-marker commands. Target debuff source uses the First/Second/Third group, not the line order. It can also skip or cancel the target marker when you have Accretion or Faded Accretion. Accretion debuff source queues the Accretion command when you receive Accretion. The script waits a random delay between min and max seconds, then executes the queued command. Commands are not executed during replay playback.",
             jp: "任意の自分用マーカーコマンドです。Target debuff を選ぶと線取り順ではなく第一/第二/第三対象のデバフグループで実行します。AccretionまたはFaded Accretion持ちの時だけ、target markerをスキップ/キャンセルする設定も使えます。Accretion debuff を選ぶと自分にAccretionが付いた時にAccretion commandを予約します。minからmax秒のランダムディレイ後に実行し、リプレイ再生中は実行しません。"));
         ImGui.Spacing();
-        ImGui.Checkbox("Execute self marker command", ref C.ExecuteMarkerCommand);
-        ImGui.Spacing();
-        ImGui.Checkbox("Is master (place party markers from priority list)", ref C.IsMaster);
-        if (C.IsMaster)
+        var placement = (int)C.MarkerPlacement;
+        if (DrawCombo("Marker placement", ref placement, MarkerPlacementNames, 280f))
+            C.MarkerPlacement = (MarkerPlacement)Math.Clamp(placement, 0, MarkerPlacementNames.Length - 1);
+        ImGui.TextWrapped(InternationalString.Print(
+            en: "Who issues the /mk commands. Each player: everyone marks themselves from their own "
+                + "debuff. Master: exactly one player marks all eight from the priority list, and nobody "
+                + "else sends anything. The two can never both be on, so the party numbers cannot be "
+                + "fought over.",
+            jp: "誰が /mk を撃つか。Each player は各自が自分のデバフから自分に付けます。Master は 1 人が "
+                + "優先順位リストから 8 人分を付け、他の誰も送りません。両方 ON にはできないので、"
+                + "マーカー番号を奪い合うことはありません。"));
+
+        if (C.MarkerPlacement == MarkerPlacement.Master)
         {
             ImGui.Indent();
             ImGui.TextWrapped(
-                "Exactly one player in the party may enable this. Markers are placed from the priority "
-                + "list once every group is resolvable and the eight slots are distinct. Nothing reads "
-                + "them back - every client still resolves from the priority list, so the markers are "
-                + "for the humans. Commands go through Splatoon's queue (170ms apart, not sent during "
-                + "duty replay) and are logged.");
+                "Exactly one player in the party may select this. Markers are placed from the priority "
+                + "list once every group is resolvable and the eight slots are distinct. Commands go "
+                + "through Splatoon's queue (170ms apart, not sent during duty replay) and are logged. "
+                + "The First/Second/Third Target commands below are reused, with <me> replaced by the "
+                + "party number.");
+            if (C.AssignmentMode is AssignmentMode.PartyMarker)
+                ImGui.TextWrapped(InternationalString.Print(
+                    en: "Note: with assignment mode Party marker, every client waits for these markers to "
+                        + "come back from the server before it can resolve, so the result depends on marker "
+                        + "latency. Assignment mode Priority resolves locally and uses the markers only as a "
+                        + "display for the humans.",
+                    jp: "注意: 割り当てモードが Party marker のときは、各クライアントがこのマーカーが"
+                        + "サーバから返ってくるのを待ってから解決するため、結果がマーカーの遅延に依存します。"
+                        + "Priority なら各自が手元で解決し、マーカーは人が見るためだけのものになります。"));
             ImGui.Checkbox("Clear markers before placing", ref C.IsMasterClearFirst);
             DrawCommand("Clear command ({0} = party number)", ref C.IsMasterClearCommand);
             ImGui.Unindent();
         }
-        ImGui.Spacing();
-        var source = (int)C.MarkerCommandSource;
-        if (DrawCombo("Marker command source", ref source, MarkerCommandSourceNames, 180f))
-            C.MarkerCommandSource = (MarkerCommandSource)Math.Clamp(source, 0, MarkerCommandSourceNames.Length - 1);
-        DrawFloat("Marker delay min (s)", ref C.MarkerDelayMinSeconds);
-        DrawFloat("Marker delay max (s)", ref C.MarkerDelayMaxSeconds);
-        ImGui.Spacing();
-        if (C.MarkerCommandSource == MarkerCommandSource.TargetDebuff)
+
+        if (C.MarkerPlacement == MarkerPlacement.EachPlayer)
         {
-            ImGui.Checkbox("Skip target marker on Accretion/Faded Accretion", ref C.SkipTargetMarkerOnAccretion);
+            ImGui.Spacing();
+            var source = (int)C.MarkerCommandSource;
+            if (DrawCombo("Marker command source", ref source, MarkerCommandSourceNames, 180f))
+                C.MarkerCommandSource = (MarkerCommandSource)Math.Clamp(source, 0, MarkerCommandSourceNames.Length - 1);
+            DrawFloat("Marker delay min (s)", ref C.MarkerDelayMinSeconds);
+            DrawFloat("Marker delay max (s)", ref C.MarkerDelayMaxSeconds);
+            if (C.MarkerCommandSource == MarkerCommandSource.AccretionDebuff)
+                DrawCommand("Accretion command", ref C.AccretionCommand);
+            else
+                ImGui.Checkbox("Skip target marker on Accretion/Faded Accretion", ref C.SkipTargetMarkerOnAccretion);
+        }
+
+        // 対象マーカーのコマンド文字列は両モードが使う。Master は <me> を <番号> に差し替える。
+        if (C.MarkerPlacement == MarkerPlacement.Master ||
+            (C.MarkerPlacement == MarkerPlacement.EachPlayer &&
+             C.MarkerCommandSource == MarkerCommandSource.TargetDebuff))
+        {
+            ImGui.Spacing();
             DrawCommand("First Target command", ref C.FirstTargetCommand);
             DrawCommand("Second Target command", ref C.SecondTargetCommand);
             DrawCommand("Third Target command", ref C.ThirdTargetCommand);
-        }
-        else
-        {
-            DrawCommand("Accretion command", ref C.AccretionCommand);
         }
         ImGui.Unindent();
     }
@@ -1510,14 +1539,15 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     // 頭上マーカーの自動設置。ここだけがサーバに届く副作用を持つ。
     //
     // 安全側の作りになっている:
-    //   - C.ExecuteMarkerCommand が既定 OFF のオプトイン
+    //   - C.MarkerPlacement が既定 Off のオプトイン
     //   - _sentMarkerCommand による一発ガード
     //   - DutyRecorderPlayback を二重にチェック (キュー時と実行時)
     //   - 0.1〜0.8 秒のランダム遅延で 8 クライアントの同時発火を散らす
     //
     // 経路は 2 つある。どちらも置いたマーカーを読み返さない:
     //   自分の分 : RunMarkerCommand -> QueueMarkerCommand -> ExecutePendingMarkerCommand
-    //   全員の分 : TryPlaceMasterMarkers (マスターのみ。C.IsMaster が既定 OFF)
+    //   全員の分 : TryPlaceMasterMarkers (C.MarkerPlacement == Master のときだけ)
+    // 2 つは C.MarkerPlacement の 1 つの値で選ぶので、同時には走らない。
     private void RunMarkerCommand(TargetGroup group)
     {
         if (C.MarkerCommandSource != MarkerCommandSource.TargetDebuff)
@@ -1571,7 +1601,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     {
         if (_sentMarkerCommand) return;
         _sentMarkerCommand = true;
-        if (!C.ExecuteMarkerCommand) return;
+        if (C.MarkerPlacement != MarkerPlacement.EachPlayer) return;
 
         var text = command ?? "";
         if (string.IsNullOrWhiteSpace(text))
@@ -1633,7 +1663,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /// そちらに変えれば発行順は関係なくなる。</remarks>
     private void TryPlaceMasterMarkers()
     {
-        if (!C.IsMaster || _placedMasterMarkers) return;
+        if (C.MarkerPlacement != MarkerPlacement.Master || _placedMasterMarkers) return;
         if (_state is not (State.CollectingAssignments or State.BlackHoleActive)) return;
 
         var order = new List<(int Rank, TargetGroup Group, uint EntityId)>();
@@ -2885,6 +2915,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     public enum FinalInitialNorthRole { Support = 0, Dps = 1 }
     public enum MapMarker { A = 0, B = 1, C = 2, D = 3 }
     public enum MarkerCommandSource { TargetDebuff = 0, AccretionDebuff = 1 }
+    // Unset は旧設定 (ExecuteMarkerCommand / IsMaster) からの移行待ちを表す。
+    // EnsureDefaults が最初の 1 回で潰すので、UI と判定には出てこない。
+    public enum MarkerPlacement { Unset = -1, Off = 0, EachPlayer = 1, Master = 2 }
 
     public sealed class Config
     {
@@ -2905,6 +2938,10 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         public uint WrongTetherColor = WithDefaultAlpha(EColor.RedBright).ToUint();
         public uint UnknownTetherColor = WithDefaultAlpha(EColor.YellowBright).ToUint();
         public int[] MarkerLineOrders = [0, 1, 2, 0, 1, 2, 0, 1];
+        // 誰が /mk を撃つか。Off / 各自 / マスター 1 人の 3 択で、同時には成立しない。
+        public MarkerPlacement MarkerPlacement = MarkerPlacement.Unset;
+        // 旧設定。独立した 2 つのフラグで両方 ON にでき、番号の奪い合いが起きていた。
+        // 読むのは EnsureDefaults の移行だけ。UI には出さない。
         public bool ExecuteMarkerCommand;
         public MarkerCommandSource MarkerCommandSource = MarkerCommandSource.TargetDebuff;
         public bool SkipTargetMarkerOnAccretion;
@@ -2972,6 +3009,12 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             FinalInitialBaitMode = (FinalInitialBaitMode)Math.Clamp((int)FinalInitialBaitMode, 0, FinalInitialBaitModeNames.Length - 1);
             FinalInitialNorthRole = (FinalInitialNorthRole)Math.Clamp((int)FinalInitialNorthRole, 0, FinalNorthRoleNames.Length - 1);
             MarkerCommandSource = (MarkerCommandSource)Math.Clamp((int)MarkerCommandSource, 0, MarkerCommandSourceNames.Length - 1);
+            // 旧設定からの移行。両方 ON だった人はマスターを優先する (送信量が少ない側)。
+            if (MarkerPlacement == MarkerPlacement.Unset)
+                MarkerPlacement = IsMaster ? MarkerPlacement.Master
+                    : ExecuteMarkerCommand ? MarkerPlacement.EachPlayer
+                    : MarkerPlacement.Off;
+            MarkerPlacement = (MarkerPlacement)Math.Clamp((int)MarkerPlacement, 0, MarkerPlacementNames.Length - 1);
             DpsMarker = ClampMarker(DpsMarker);
             SupportMarker = ClampMarker(SupportMarker);
             AccretionMarker = ClampMarker(AccretionMarker);
