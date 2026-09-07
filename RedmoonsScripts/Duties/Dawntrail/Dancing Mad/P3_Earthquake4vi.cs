@@ -56,6 +56,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///                                                       -> C.HandleFinalSequence
 ///   v59 マーカー消去を戦闘開始とギミック終了だけにする (OnReset では撃たない)
 ///                                                       -> OnCombatStart
+///   v60 マーカー消去は現状を確認せず無条件に撃つ -> Complete
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
@@ -328,7 +329,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(59, "Garume, Redmoon");
+    public override Metadata Metadata => new(60, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -370,9 +371,10 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     /// 飛んでくるが、そこで撃つと立て直しの最中や解散後にコマンドが 8 本流れる。
     /// プルの頭で 1 回だけ白紙に戻すのが、いちばん邪魔にならない。
     ///
-    /// 前のプルで置いたかどうかは見ずに必ず予約する。全滅した回は <c>Complete</c> を通らないので
-    /// 置きっぱなしのまま <c>_placedMasterMarkers</c> だけが戻っており、条件を付けると
-    /// 消し損ねるため。実際に送るかどうかは <see cref="ExecutePendingMasterClear"/> が判断する。
+    /// 自分が置いたかどうかは見ずに必ず予約する。置いた記録 (<c>_placedMasterMarkers</c>) は
+    /// 全滅した回にリセットで戻ってしまい当てにならないし、他人が付けたマーカーが残っている
+    /// こともある。消すのに現状を確かめる必要はないので、条件を付けずに毎回撃つ。
+    /// マスター以外に送らない判断だけ <see cref="ExecutePendingMasterClear"/> がする。
     ///
     /// ここから直接送ってはいけない。Splatoon は OnReset の直後に
     /// <c>Controller.CancelQueuedCommands()</c> を呼ぶので、この場で積んだぶんは破棄される。</remarks>
@@ -1483,6 +1485,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     /// <summary>予約されていれば、マスターが置いた頭上マーカーを 8 人分消す。</summary>
     /// <remarks>予約が入るのは 2 か所だけ。戦闘開始 (<see cref="OnCombatStart"/>) と、
     /// 担当ギミックが終わったとき (<c>Complete</c>)。全滅・戦闘終了・ディレクタ更新では撃たない。
+    /// どちらも無条件。マーカーが実際に付いているかは確認しない。
     ///
     /// 送信は Splatoon のキュー経由なので 170ms 間隔が守られ、リプレイ中は送らず緑文字で出る。
     /// マスター以外は何もしない。</remarks>
@@ -1861,9 +1864,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         Log($"Complete: slot={_selfSlot} src={_quality} landings={_landingCount} " +
             $"stackMarkers={_finalStackMarkerCount} dondoko={_finalDondokoHitCount} towers={_finalTowerPositions.Count}");
         _state = State.Completed;
-        // ClearMechanicState が _placedMasterMarkers を戻すので、その前に見ておく。
-        if (_placedMasterMarkers)
-            _pendingMasterClear = true;
+        _pendingMasterClear = true;
         ClearMechanicState(clearSlot: false);
         HideElements();
     }
