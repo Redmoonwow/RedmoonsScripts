@@ -46,6 +46,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v55 終盤の基準方向を、ロール散開・塔・突出せよでも凍結値に揃える -> FinalPairAnchorAngle
 ///   v56 診断用ログを主要な決定点に入れる -> Log
 ///   v57 ログは C.VerboseLog が ON のときだけ出す (既定 OFF) -> Log
+///   v58 終盤の判定を丸ごと止める設定を足す。終了検知とマーカー消去は残す
+///                                                       -> C.HandleFinalSequence
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -302,7 +304,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(57, "Garume, Redmoon");
+    public override Metadata Metadata => new(58, "Garume, Redmoon");
 
     #endregion
 
@@ -414,6 +416,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             // ロールが取れるかどうかに関わらず、CenterBait に入ったこの瞬間のケフカの向きを確定させる。
             // 後からロールが解決したとき、そのときのケフカ位置ではなく突入時の向きを使わせるため。
             FreezeFinalAnchorAngle();
+            if (!C.HandleFinalSequence) return;
+
             if (TryGetFinalInitialBaitGuide(out var destination, out var text))
                 SetGuide(destination, text, GuidanceKind.FinalCenter, LateP3Blizzaga, 0.0f, 0.0f);
             else
@@ -850,10 +854,17 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         ImGui.TextWrapped(InternationalString.Print(
             en: "When enabled, Black Hole windows show only the Black Hole tether line. Destination circles and waiting text are hidden during Black Hole.",
             jp: "有効にすると、ブラックホール中はブラックホールのテザー線だけを表示します。誘導先の円と待機テキストは非表示になります。"));
-        ImGui.Checkbox("Show post-Black-Hole final navigation", ref C.ShowPostBlackHoleNavigation);
+        ImGui.Checkbox("Handle post-Black-Hole final sequence", ref C.HandleFinalSequence);
         ImGui.TextWrapped(InternationalString.Print(
-            en: "Show or hide the final-sequence navigation after the Black Hole windows. Black Hole tether tracking and assignments still run even when this is disabled.",
-            jp: "ブラックホール後の最終ギミック用ナビを表示するかを切り替えます。OFFでもブラックホールの線追跡と割り当て処理は動作します。"));
+            en: "When disabled, the final sequence after the Black Hole windows is not judged at all: no center bait, role spread, landing, tower or protrude guidance is computed. Black Hole tracking still runs, the mechanic still completes normally, and master markers are still cleared at the end.",
+            jp: "OFF にすると、ブラックホール後の最終ギミックを一切判定しません。中央誘導・ロール散開・着地・塔・突出せよのいずれも計算しません。ブラックホールの線追跡はそのまま動き、ギミックの終了検知も通るので、マスターのマーカー消去も最後まで従来どおり実行されます。"));
+        if (C.HandleFinalSequence)
+        {
+            ImGui.Checkbox("Show post-Black-Hole final navigation", ref C.ShowPostBlackHoleNavigation);
+            ImGui.TextWrapped(InternationalString.Print(
+                en: "Show or hide the final-sequence navigation after the Black Hole windows. Black Hole tether tracking and assignments still run even when this is disabled.",
+                jp: "ブラックホール後の最終ギミック用ナビを表示するかを切り替えます。OFFでもブラックホールの線追跡と割り当て処理は動作します。"));
+        }
         ImGui.Unindent();
     }
 
@@ -1173,6 +1184,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         // 見る人が変わったので、終盤の誘導は新しい人のロールで出し直す。
         // 実プレイでは起きない。duty replay の Base Player Override 専用の経路。
         if (_state != State.FinalSequence)
+            return;
+        if (!C.HandleFinalSequence)
             return;
 
         switch (_finalStage)
@@ -1931,7 +1944,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         {
             var anchorText = _finalAnchorAngle is { } a ? $"{Deg(a):F1}" : "-";
             Log($"EnterFinalSequence: anchor={anchorText} ownRole={OwnFinalStackRole()} " +
-                $"first={_firstFinalStackRole} second={_secondFinalStackRole}");
+                $"first={_firstFinalStackRole} second={_secondFinalStackRole}" +
+                (C.HandleFinalSequence ? "" : " / 終盤の判定は設定で OFF"));
         }
         _currentWindow = Math.Max(_currentWindow, 10);
         _instruction = "";
@@ -2041,6 +2055,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
     private void SetFinalLanding(FinalStackRole stackRole)
     {
+        if (!C.HandleFinalSequence) return;
         if (stackRole == FinalStackRole.Unknown)
             return;
 
@@ -2089,6 +2104,8 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
     private void SetFinalRoleGuide(bool show, InternationalString text, GuidanceKind kind, uint actionId)
     {
+        if (!C.HandleFinalSequence) return;
+
         if (TryGetOwnRolePosition(out var role))
         {
             // ケフカ基準から見たロールごとの振り分け角。T/H が前 45 度、M/R が後ろ 135 度。
@@ -3114,6 +3131,10 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         public FinalInitialBaitMode FinalInitialBaitMode = FinalInitialBaitMode.Center;
         public FinalInitialNorthRole FinalInitialNorthRole = FinalInitialNorthRole.Support;
         public bool BlackHoleTetherOnly;
+        // 終盤 (ブラックホール後) を判定するか。OFF にすると中央誘導・ロール散開・着地・塔・
+        // 突出せよを一切計算しない。終了検知は別経路なので OFF でも Complete は通り、
+        // マスターが置いたマーカーの消去もそのまま走る。
+        public bool HandleFinalSequence = true;
         public bool ShowPostBlackHoleNavigation = true;
         // 診断用ログ。状態が変わった瞬間だけを Dalamud のログに残す。
         // 追いたいことがあるときだけ ON にする。既定は OFF。
