@@ -48,6 +48,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v57 ログは C.VerboseLog が ON のときだけ出す (既定 OFF) -> Log
 ///   v58 終盤の判定を丸ごと止める設定を足す。終了検知とマーカー消去は残す
 ///                                                       -> C.HandleFinalSequence
+///   v59 マーカー消去を戦闘開始とギミック終了だけにする (OnReset では撃たない)
+///                                                       -> OnCombatStart
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -239,7 +241,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     private bool _selfHadAccretionMarkerBlock;   // Accretion によりマーカー送信を抑止したか
     private bool _placedMasterMarkers;           // マスターが 8 人分のマーカーを置いたか。一発ガード
     // マスターが置いたマーカーの消去待ち。どの Clear でも戻さない。
-    // ClearMechanicState が立て、OnUpdate の ExecutePendingMasterClear が消費する。
+    // OnCombatStart と Complete が立て、OnUpdate の ExecutePendingMasterClear が消費する。
     private bool _pendingMasterClear;
 
     // ---- ClearMechanicState が終盤ぶんとして戻す -------------------------------
@@ -304,7 +306,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(58, "Garume, Redmoon");
+    public override Metadata Metadata => new(59, "Garume, Redmoon");
 
     #endregion
 
@@ -350,7 +352,23 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         });
     }
 
-    public override void OnCombatStart() => ResetAll();
+    /// <summary>戦闘開始。状態を全部戻し、前のプルのマーカーを消す予約を入れる。</summary>
+    /// <remarks>消去はここでしか予約しない。全滅・戦闘終了・ディレクタ更新でも <c>OnReset</c> は
+    /// 飛んでくるが、そこで撃つと立て直しの最中や解散後にコマンドが 8 本流れる。
+    /// プルの頭で 1 回だけ白紙に戻すのが、いちばん邪魔にならない。
+    ///
+    /// 前のプルで置いたかどうかは見ずに必ず予約する。全滅した回は <c>Complete</c> を通らないので
+    /// 置きっぱなしのまま <c>_placedMasterMarkers</c> だけが戻っており、条件を付けると
+    /// 消し損ねるため。実際に送るかどうかは <see cref="ExecutePendingMasterClear"/> が判断する。
+    ///
+    /// ここから直接送ってはいけない。Splatoon は OnReset の直後に
+    /// <c>Controller.CancelQueuedCommands()</c> を呼ぶので、この場で積んだぶんは破棄される。</remarks>
+    public override void OnCombatStart()
+    {
+        ResetAll();
+        _pendingMasterClear = true;
+    }
+
     public override void OnCombatEnd() => ResetAll();
     public override void OnReset() => ResetAll();
 
@@ -1863,12 +1881,11 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     }
 
     /// <summary>予約されていれば、マスターが置いた頭上マーカーを 8 人分消す。</summary>
-    /// <remarks>ギミックが終わったとき (<c>Complete</c>) と、リセット全般 (戦闘開始・終了・全滅・
-    /// ディレクタ更新) の両方から予約が入る。どちらも <see cref="ClearMechanicState"/> を通るため、
-    /// 予約はそこ 1 か所で立てている。
+    /// <remarks>予約が入るのは 2 か所だけ。戦闘開始 (<see cref="OnCombatStart"/>) と、
+    /// 担当ギミックが終わったとき (<c>Complete</c>)。全滅・戦闘終了・ディレクタ更新では撃たない。
     ///
-    /// 実際に置いた回だけ走る。何も置いていないのに毎プル開始で 8 本撃つのを避けるため。
-    /// 送信は Splatoon のキュー経由なので 170ms 間隔が守られ、リプレイ中は送らず緑文字で出る。</remarks>
+    /// 送信は Splatoon のキュー経由なので 170ms 間隔が守られ、リプレイ中は送らず緑文字で出る。
+    /// マスター以外は何もしない。</remarks>
     private void ExecutePendingMasterClear()
     {
         if (!_pendingMasterClear) return;
@@ -2132,6 +2149,9 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         Log($"Complete: slot={_selfSlot} src={_quality} landings={_landingCount} " +
             $"stackMarkers={_finalStackMarkerCount} dondoko={_finalDondokoHitCount} towers={_finalTowerPositions.Count}");
         _state = State.Completed;
+        // ClearMechanicState が _placedMasterMarkers を戻すので、その前に見ておく。
+        if (_placedMasterMarkers)
+            _pendingMasterClear = true;
         ClearMechanicState(clearSlot: false);
         HideElements();
     }
@@ -2164,11 +2184,6 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
 
     private void ClearMechanicState(bool clearSlot)
     {
-        // 置いたものが残っているなら消去を予約する。ここから直接送ってはいけない。
-        // OnReset は script.OnReset() の直後に Controller.CancelQueuedCommands() を呼ぶので、
-        // この場で積んだコマンドはそのまま破棄される。次の OnUpdate まで持ち越す。
-        if (_placedMasterMarkers)
-            _pendingMasterClear = true;
         _placedMasterMarkers = false;
         _earthPlayers.Clear();
         _accretionPlayers.Clear();
