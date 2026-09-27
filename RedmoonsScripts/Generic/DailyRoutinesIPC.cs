@@ -7,6 +7,7 @@ using Splatoon.SplatoonScripting;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 
 namespace RedmoonsScripts.Generic;
 
@@ -38,7 +39,7 @@ internal class DailyRoutinesIPC : SplatoonScript
     /// <remarks>
     /// 貼り先に必要な using:
     ///   using Dalamud.Game.ClientState.Conditions;  using ECommons.DalamudServices;
-    ///   using ECommons.EzIpcManager;  using System;  using System.Linq;
+    ///   using ECommons.EzIpcManager;  using System;  using System.Linq;  using System.Numerics;
     ///
     /// 使い方:
     ///   private readonly Api _dr = new();
@@ -160,19 +161,72 @@ internal class DailyRoutinesIPC : SplatoonScript
         public bool ChangeSpeedMultiplier(float multiplier) =>
             Send("AutoSpeedMultiplier", () => _speedChange(Math.Clamp(multiplier, 0.0f, 10.0f)));
 
-        /// <summary>カメラ方向に自動で向き直すモードの ON/OFF。</summary>
+        // ---- 向きの固定 ---------------------------------------------------------
+        // どれも「固定する」だけで、CancelFacingLock を呼ぶまで外れない。一発で振り向く API ではない。
+        // 固定中はモジュールが毎フレーム向きを書き戻し、33ms (duty 内) / 100ms 間隔で
+        // 位置パケットを送り続ける。詠唱中は送らない。
+        //
+        // 3 つの IPC は角度の規約がそれぞれ違う。モジュールの中では全部 LockOnChara の値
+        // (= キャラの Rotation) に変換されて同じ変数に入る:
+        //   LockOnGround(string)  "north" など 8 方位。**小文字限定**。IPC 経路は小文字化しない
+        //   LockOnChara(float)    キャラの Rotation そのもの。ラジアン、0=南 / +π/2=東 / ±π=北 / -π/2=西
+        //   LockOnCamera(float)   カメラの DirH。キャラの向き = DirH + π
+        // 自分のコードの角度 (コンパス方位・DirectionCalculator) から入れるなら
+        // LockFacingOnBearing / LockFacingToward を使う。変換をここで 1 回だけ書くため。
+
+        /// <summary>SetWorkMode。false が普通の状態。</summary>
+        /// <remarks>true にすると意味が反転し、DailyRoutines の「打断キー」を押している間だけ
+        /// 固定が効くようになる。スクリプトから固定したいなら false のまま触らない。</remarks>
         public bool SetFacingWorkMode(bool enabled) =>
             Send("AutoFaceCameraDirection", () => _faceSetWorkMode(enabled));
 
-        /// <summary>方角で向きを固定する。"North" など。</summary>
+        /// <summary>8 方位の名前で向きを固定する。"north" "northeast" … "northwest"。</summary>
+        /// <remarks>受け側は <c>FrozenDictionary</c> の既定比較 (大文字小文字を区別) で引いており、
+        /// /pdrface コマンドと違って IPC 経路は小文字化しない。"North" を渡すと黙って false が返る。
+        /// ここで小文字にしてから渡す。</remarks>
         public bool? LockFacingOnGround(string direction) =>
-            Gate("AutoFaceCameraDirection") && Mutate() ? _faceLockGround(direction) : null;
+            Gate("AutoFaceCameraDirection") && Mutate() ? _faceLockGround(direction.ToLowerInvariant()) : null;
 
+        /// <summary>キャラの Rotation (ラジアン) で向きを固定する。</summary>
+        /// <remarks>0=南 / +π/2=東 / ±π=北 / -π/2=西。反時計回りが正。
+        /// <c>IGameObject.Rotation</c> と同じ値なので、他人の向きを写すならそのまま渡せる。</remarks>
         public bool LockFacingOnChara(float rotation) =>
-            Send("AutoFaceCameraDirection", () => _faceLockChara(rotation));
+            Send("AutoFaceCameraDirection", () => _faceLockChara(NormalizeChara(rotation)));
 
-        public bool LockFacingOnCamera(float rotation) =>
-            Send("AutoFaceCameraDirection", () => _faceLockCamera(rotation));
+        /// <summary>カメラの DirH で向きを固定する。キャラはその反対 (DirH + π) を向く。</summary>
+        /// <remarks>受け側の変換は結果を [0, 2π) で返すので、キャラの Rotation の範囲 [-π, π] と
+        /// ずれる。スクリプトから使う理由はほぼ無い。LockFacingOnChara の方が素直。</remarks>
+        public bool LockFacingOnCamera(float dirH) =>
+            Send("AutoFaceCameraDirection", () => _faceLockCamera(dirH));
+
+        /// <summary>コンパス方位 (度) で向きを固定する。0=北 / 90=東 / 180=南 / 270=西、時計回り。</summary>
+        /// <remarks><c>MathHelper.GetRelativeAngle</c> と同じ規約。本人の <c>FaceTarget(rot)</c> の引数とも同じ。
+        /// Rotation = π − 方位。Splatoon の <c>Utils.GetRotationWithOverride</c> と同じ式。
+        /// DirectionCalculator の角度 (東=0 の時計回り) から来るなら、方位 = その角度 + 90。</remarks>
+        public bool LockFacingOnBearing(float degrees) =>
+            LockFacingOnChara(MathF.PI - degrees * MathF.PI / 180f);
+
+        /// <summary><paramref name="from"/> から <paramref name="target"/> の方を向いて固定する。</summary>
+        /// <remarks>受け側の <c>WorldDirHToChara</c> と同じ <c>atan2(ΔX, ΔZ)</c>。
+        /// 方位を経由しないので度とラジアン、時計回りと反時計回りを一度も混ぜずに済む。
+        /// 自分を回すなら from に BasePlayer.Position を渡す (Api からは BasePlayer が見えないため引数にしてある)。
+        /// 2 点がほぼ重なっていると向きが決まらないので、そのときは何もしない。</remarks>
+        public bool LockFacingToward(Vector3 from, Vector3 target)
+        {
+            var dx = target.X - from.X;
+            var dz = target.Z - from.Z;
+            if (dx * dx + dz * dz < 0.0001f) return false;
+            return LockFacingOnChara(MathF.Atan2(dx, dz));
+        }
+
+        /// <summary>角度を (-π, π] に畳む。キャラの Rotation の範囲に合わせる。</summary>
+        /// <remarks>方位からの変換は -π を少し下回る値を作りうる (方位 360 付近)。
+        /// 受け側は値をそのまま書くので、ここで範囲に戻してから渡す。</remarks>
+        private static float NormalizeChara(float rotation)
+        {
+            var r = MathF.IEEERemainder(rotation, MathF.Tau);
+            return r <= -MathF.PI ? r + MathF.Tau : r;
+        }
 
         /// <summary>ノックバック処理の方式を変える。0〜4。</summary>
         public bool? ChangeKnockbackMethod(int method) =>
@@ -208,7 +262,7 @@ internal class DailyRoutinesIPC : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = null;   // どこでも。OnUpdate は何もしない
-    public override Metadata Metadata => new(1, "Redmoon");
+    public override Metadata Metadata => new(2, "Redmoon");
 
     #endregion
 
@@ -307,8 +361,11 @@ internal class DailyRoutinesIPC : SplatoonScript
         if (ImGui.Button("Speed x1"))
             _lastResult = $"ChangeMultiplier(1) = {_dr.ChangeSpeedMultiplier(1.0f)}";
         ImGui.SameLine();
-        if (ImGui.Button("Face: lock north"))
-            _lastResult = $"LockOnGround(North) = {Show(_dr.LockFacingOnGround("North"))}";
+        if (ImGui.Button("Face: lock north (ground)"))
+            _lastResult = $"LockOnGround(north) = {Show(_dr.LockFacingOnGround("north"))}";
+        ImGui.SameLine();
+        if (ImGui.Button("Face: lock east (bearing 90)"))
+            _lastResult = $"LockFacingOnBearing(90) = {_dr.LockFacingOnBearing(90f)}";
         ImGui.SameLine();
         if (ImGui.Button("Face: cancel"))
             _lastResult = $"CancelLockOn = {_dr.CancelFacingLock()}";

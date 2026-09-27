@@ -391,3 +391,74 @@ var path = MathHelper.CalculateCircularMovement(
 7. 方位 (時計回り) とオブジェクト Rotation (反時計回り) の符号を混ぜていないか
 8. アリーナ中心を `(100, 0, 100)` と決め打ちしてよいコンテンツか
    (そうでないアリーナもある。ボスの初期位置や床オブジェクトから取る方が安全)
+9. 向きを外部に渡すとき、相手がどの規約 (§11 の 4 つ) を取るか**ソースで**確かめたか
+   (ドキュメントや引数名の `rotation` を信じない。同じ名前で 3 通りの意味がある)
+
+---
+
+## 11. 向きの規約は 4 つある — DailyRoutines の FaceLock を例に
+
+同じ「向き」を表す数が、コードベースに 4 通り流れている。**どれも間違いではなく、
+混ぜた瞬間に壊れる。** 北を向くだけで値が `0` / `270` / `π` / `0` (カメラ) と全部違う。
+
+| 規約 | 単位 | 0 の向き | 増える向き | 範囲 | 出どころ |
+|---|---|---|---|---|---|
+| **コンパス方位 B** | 度 | 北 | 時計回り | [0, 360) | `MathHelper.GetRelativeAngle`、本人の `FaceTarget(rot)` |
+| **DirectionCalculator 角 A** | 度 | **東** | 時計回り | 45 刻み | 本人の API。`GetAngle(dir) = (int)dir * 45` |
+| **キャラ Rotation R** | ラジアン | **南** | **反時計回り** | [-π, π] | `IGameObject.Rotation`、DR の `LockOnChara` |
+| **カメラ DirH** | ラジアン | — | — | — | カメラの向き。キャラはその**反対** |
+
+変換 (全部この 3 本で足りる):
+
+```
+B = A + 90                      DirectionCalculator → 方位
+R = π − B·π/180  を (-π, π] へ   方位 → キャラ Rotation  (Splatoon Utils.GetRotationWithOverride と同じ式)
+R = atan2(ΔX, ΔZ)               2 点から直接。度も時計回りも経由しない ← これが一番安全
+```
+
+`atan2(ΔX, ΔZ)` の引数順に注意。.NET の `MathF.Atan2(y, x)` の第 1 引数に **X** を入れている。
+これで「+Z (南) から +X (東) へ回る角」になり、Rotation の定義 (0=南, +π/2=東) と一致する。
+
+### 本人の `FaceTarget(rot)` は方位を取る
+
+```csharp
+var adjustedRotation = (rotation + 270) % 360;                     // 方位 → 東基準の角
+var direction = new Vector2(MathF.Cos(adj°), MathF.Sin(adj°));     // (X, Z)
+ActionManager->AutoFaceTargetPosition(player.Position + direction.ToVector3());
+```
+
+`+270` は方位を「東=0 の数学角」に直している (`B − 90` と同じ)。`Vector2.ToVector3()` は
+`(X, 自機 Y, Y)` なので `Vector2.Y` がワールド Z に入る。結果の方向ベクトルは `(sin B, −cos B)`、
+それを `atan2` に通すと `π − B` になり、DR の Rotation と**一致する** (0〜359° 全方位で数値検証済み)。
+つまり **`FaceTarget(B)` と `LockOnChara(π − B)` は同じ向き**。
+
+### DailyRoutines `AutoFaceCameraDirection` の 3 つの IPC
+
+出典: `Dalamud-DailyRoutines/DailyRoutines.ModulesPublic` の `System/AutoFaceCameraDirection.cs`、
+変換は `AtmoOmen/OmenTools` の `Interop/Game/Helpers/RotationHelper.cs`。
+
+| IPC | 受け取るもの | 中での変換 |
+|---|---|---|
+| `LockOnGround(string)` | `"north"` `"northeast"` … 8 方位 | 方向ベクトル → `atan2(X, Z)` |
+| `LockOnChara(float)` | キャラ Rotation そのもの | 無変換 |
+| `LockOnCamera(float)` | カメラの DirH | `(DirH + π) mod 2π` |
+
+どれも最後は同じ `lockOnRotation` (= キャラ Rotation) に入る。
+
+**罠 1 — `LockOnGround` は小文字限定。** キーは `FrozenDictionary` の既定比較で引かれ、
+`/pdrface` コマンド経路は `ToLowerInvariant()` するが **IPC 経路はしない**。`"North"` を渡すと
+黙って `false` が返り、何も起きない。
+
+**罠 2 — `LockOnCamera` の結果は [0, 2π)。** キャラ Rotation の範囲 [-π, π] とずれる
+(DirH > 0 の半分で π を超える)。スクリプトから使う理由はない。`LockOnChara` を使う。
+
+**罠 3 — 「振り向く」ではなく「固定する」。** `CancelLockOn` を呼ぶまで外れない。
+固定中はモジュールが向きを毎フレーム書き戻し、位置パケットを 33ms (duty 内) / 100ms 間隔で
+送り続ける。詠唱中は送らない。
+
+**罠 4 — `SetWorkMode(true)` は意味が反転する。** DR の「打断キー」を押している間だけ効く
+モードになる。スクリプトから固定するなら `false` のまま触らない。
+
+ラッパは `RedmoonsScripts/Generic/DailyRoutinesIPC.cs` の `Api`。
+方位からは `LockFacingOnBearing(B)`、座標からは `LockFacingToward(from, target)` を使えば
+上の変換を自分で書かずに済む。
