@@ -5,6 +5,7 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
 using ECommons;
 using ECommons.DalamudServices;
+using ECommons.GameFunctions;
 using ECommons.Hooks;
 using ECommons.Hooks.ActionEffectTypes;
 using ECommons.ImGuiMethods;
@@ -39,6 +40,10 @@ namespace RedmoonsScripts.Generic;
 /// コンパス方位ではないので読み違えないこと (ffxiv-coordinates §11)。
 /// 詠唱はパケット経路 [pkt] とメモリ監視経路 [mem] の両方を出す。前者はサーバの値、後者は
 /// 次のフレームにクライアントが補間した値で、向きがずれることがある。
+///
+/// イベントの行には、そのイベントに出てきたオブジェクトしか載らない。見えないヘルパー・塔の EventObj・
+/// まだ何もしていない敵はいつまで待っても出てこないので、別にオブジェクトダンプを取る
+/// (トライ開始 / フェーズ変化 / 定期 / 手動)。項目は Splatoon の Object Explorer に合わせてある。
 ///
 /// 書き込みはゲームスレッドで行う。64KB のバッファに溜めて 1 秒ごとに吐くので、ローカルディスクなら
 /// フレームに響かない。書き込みが失敗したらそのトライは記録をやめる (毎イベント例外を出し続けないため)。
@@ -92,6 +97,16 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
         public bool BuffSkipPlayers = false;
         public bool BuffSkipEnemies = false;
         public bool LogReset = true;
+
+        // オブジェクトダンプ
+        public bool DumpOnTryStart = true;
+        public bool DumpOnPhaseChange = true;
+        public float DumpIntervalSeconds = 0f;   // 0 = 定期ダンプしない
+        public bool DumpPlayers = true;
+        public bool DumpEventObjects = true;
+        public bool DumpOtherKinds = false;
+        public bool DumpStatuses = true;
+        public bool DumpAttached = true;         // VFX / テザー / ObjectEffect / 最後の詠唱
     }
 
     #endregion
@@ -101,7 +116,7 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = null;   // どこでも
-    public override Metadata Metadata => new(1, "Redmoon");
+    public override Metadata Metadata => new(2, "Redmoon");
 
     #endregion
 
@@ -116,6 +131,7 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
     private long _lines;
     private long _nextFlushMs;
     private long _closeAtMs;              // 0 = 閉じる予定なし。戦闘終了で猶予ぶん先を入れる
+    private long _nextDumpMs;             // 次の定期ダンプ
     private uint _tryTerritory;
 
     // ---- トライをまたいで残す -----------------------------------------------
@@ -165,12 +181,22 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
         var now = Environment.TickCount64;
         if (_closeAtMs != 0 && now >= _closeAtMs) { EndTry("戦闘終了"); return; }
         if (Svc.ClientState.TerritoryType != _tryTerritory) { EndTry("地域が変わった"); return; }
-        if (now < _nextFlushMs) return;
+        if (C.DumpIntervalSeconds > 0f && now >= _nextDumpMs)
+        {
+            _nextDumpMs = now + (long)(C.DumpIntervalSeconds * 1000f);
+            DumpObjects("定期");
+        }
+        // ダンプ中の書き込み失敗で閉じていることがある
+        if (now < _nextFlushMs || !Recording) return;
         _nextFlushMs = now + 1000;
         Guard(() => _writer!.Flush());
     }
 
-    public override void OnPhaseChange(int newPhase) { if (C.LogPhaseChange) Write($"OnPhaseChange: {newPhase}"); }
+    public override void OnPhaseChange(int newPhase)
+    {
+        if (C.LogPhaseChange) Write($"OnPhaseChange: {newPhase}");
+        if (C.DumpOnPhaseChange) DumpObjects($"フェーズ {newPhase}");
+    }
 
     public override void OnMapEffect(uint position, ushort data1, ushort data2)
     {
@@ -276,6 +302,7 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
         DrawDirectory();
         ImGui.Separator();
         DrawStatus();
+        if (ImGuiEx.CollapsingHeader("Object dump")) DrawDumpSettings();
         if (ImGuiEx.CollapsingHeader("Events")) DrawFilters();
     }
 
@@ -308,27 +335,38 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
         }
 
         var replay = Svc.Condition[ConditionFlag.DutyRecorderPlayback];
-        var name = $"{DateTime.Now:yyyyMMdd-HHmmss}_T{territory}_{SafeFileName(ContentName(territory))}" +
-                   $"_try{_tryNumber:D2}{(replay ? "_replay" : "")}.log";
-        var path = Path.Combine(check.FullPath, name);
+        if (!OpenLogFile(check, $"try{_tryNumber:D2}{(replay ? "_replay" : "")}")) return;
 
+        WriteHeader(territory, $"トライ {_tryNumber}{(replay ? " (duty recorder 再生中)" : "")}");
+        if (C.LogCombatStartEnd) Write("OnCombatStart");
+        if (C.DumpOnTryStart) DumpObjects("トライ開始");
+        if (Recording) SetStatus(CheckLevel.Ok, $"記録中: {_fileName}");
+    }
+
+    /// <summary>ディレクトリにログファイルを 1 本開く。開けたら true。</summary>
+    /// <remarks>名前は 日時_T地域_コンテンツ名_タグ.log。CreateNew なので同名は上書きせず失敗させる。
+    /// FileShare.Read で開くので、書いている最中でもエディタで開いて読める。</remarks>
+    private bool OpenLogFile(PathCheck check, string tag)
+    {
+        var territory = Svc.ClientState.TerritoryType;
+        var name = $"{DateTime.Now:yyyyMMdd-HHmmss}_T{territory}_{SafeFileName(ContentName(territory))}_{tag}.log";
+        var path = Path.Combine(check.FullPath, name);
         Guard(() =>
         {
-            // CreateNew: 同名があれば上書きせずに失敗させる。FileShare.Read: 書いている最中に開いて読めるように
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 65536);
             _writer = new StreamWriter(stream, new UTF8Encoding(false), 65536);
         });
-        if (!Recording) return;
+        if (!Recording) return false;
 
+        var now = Environment.TickCount64;
         _fileName = name;
         _tryTerritory = territory;
         _lines = 0;
         _closeAtMs = 0;
-        _nextFlushMs = Environment.TickCount64 + 1000;
+        _nextFlushMs = now + 1000;
+        _nextDumpMs = now + (long)(C.DumpIntervalSeconds * 1000f);
         _clock.Restart();
-        WriteHeader(territory, replay);
-        if (C.LogCombatStartEnd) Write("OnCombatStart");
-        SetStatus(CheckLevel.Ok, $"記録中: {name}");
+        return true;
     }
 
     /// <summary>ファイルを閉じる。開いていなければ何もしない。どこから呼ばれてもよい。</summary>
@@ -347,18 +385,21 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
     /// <summary>ファイルの頭に、読むのに要る前提を書く。</summary>
     /// <remarks>ログの EID は数字でしかないので、誰が誰かをここで対応させておく。
     /// 角度の規約もここに書く。後から読む人 (自分を含む) が R を方位と取り違えないように。</remarks>
-    private void WriteHeader(uint territory, bool replay)
+    private void WriteHeader(uint territory, string what)
     {
         WriteRaw($"# ScriptEventRecorder v{Metadata.Version}");
         WriteRaw($"# 開始     : {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
         WriteRaw($"# 地域     : {territory} {ContentName(territory)}");
-        WriteRaw($"# トライ   : {_tryNumber}{(replay ? " (duty recorder 再生中)" : "")}");
+        WriteRaw($"# 内容     : {what}");
         WriteRaw($"# 自分     : {Obj(BasePlayer)} {Job(BasePlayer)}");
         foreach (var pc in Controller.GetPartyMembers())
             WriteRaw($"# パーティ : {Obj(pc)} {Job(pc)}");
         WriteRaw("# 時刻     : 行頭はトライ開始からの経過 (分:秒.ミリ秒)");
         WriteRaw("# R        : IGameObject.Rotation (ラジアン)。0=南 / +π/2=東 / ±π=北 / -π/2=西。方位ではない");
         WriteRaw("# 詠唱     : [pkt]=パケット (サーバ値) / [mem]=メモリ監視 (次フレームの補間値)");
+        WriteRaw("# ダンプ   : [種別] 名前[..] nameId hb tgt dead owner hp model target");
+        WriteRaw("#            cast=詠唱中 / status / lastCast=Splatoon が覚えている最後の詠唱 / vfx / tether / objfx");
+        WriteRaw("#            age はそれが起きてからの秒数");
         WriteRaw("");
     }
 
@@ -384,10 +425,113 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
         if (!targetId.TryGetObject(out var obj)) return;
         if (C.BuffSkipPlayers && obj is IPlayerCharacter) return;
         if (C.BuffSkipEnemies && obj is IBattleNpc) return;
-        var name = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Status>().GetRowOrDefault(status.StatusId)?.Name.ToString();
         // Param は「スタック数」だけでなく、ギミックの種別を載せていることがある (真偽の判定に使われる例あり)
-        Write($"{kind}: {name ?? "?"}({status.StatusId}) param={status.Param} remain={status.RemainingTime:F2} " +
+        Write($"{kind}: {StatusName(status.StatusId)} param={status.Param} remain={status.RemainingTime:F2} " +
               $"from=0x{status.SourceObject.ObjectId:X8} on={Obj(obj)}");
+    }
+
+    // ---- オブジェクトダンプ ----------------------------------------------------
+
+    /// <summary>その瞬間にオブジェクトテーブルに居るものを全部書く。</summary>
+    /// <remarks>
+    /// スクリプトが BaseId や NameId で何かを探して見つからないとき、答えはここにある。
+    /// イベントを待っていても、何もしないヘルパーや EventObj は出てこない。
+    ///
+    /// 項目は Splatoon の Object Explorer (Gui/Explorer.cs) に合わせた。ゲーム内で見た値と突き合わせるため。
+    /// 付随情報は Splatoon が AttachedInfo に覚えているもので、element の refActorRequireCast や
+    /// refActorVFXPath が見ているのもこれ。
+    ///
+    /// 並びは 種別 → BaseId → EntityId で固定。2 回のダンプを diff で比べられるように。
+    /// ペットとチョコボはプレイヤーの持ち物でギミックと関係ないので出さない。
+    /// </remarks>
+    private void DumpObjects(string reason)
+    {
+        if (!Recording) return;
+        var targets = Svc.Objects.Where(ShouldDump)
+            .OrderBy(KindOrder).ThenBy(o => o.BaseId).ThenBy(o => o.EntityId).ToList();
+        Write($"=== ObjectDump ({reason}) {targets.Count} 件 ===");
+        foreach (var obj in targets) DumpOne(obj);
+        WriteRaw("");
+    }
+
+    private bool ShouldDump(IGameObject obj) => obj switch
+    {
+        IBattleNpc npc => npc.BattleNpcKind is not (BattleNpcSubKind.Pet or BattleNpcSubKind.RaceChocobo),
+        IPlayerCharacter => C.DumpPlayers,
+        _ => obj.ObjectKind == ObjectKind.EventObj ? C.DumpEventObjects : C.DumpOtherKinds,
+    };
+
+    private static int KindOrder(IGameObject obj) => obj switch
+    {
+        IBattleNpc => 0,
+        _ when obj.ObjectKind == ObjectKind.EventObj => 1,
+        IPlayerCharacter => 2,
+        _ => 3,
+    };
+
+    /// <summary>1 オブジェクトぶん。1 行目が本体、字下げした行が詠唱・ステータス・付随情報。</summary>
+    /// <remarks>nameId は element の refActorNPCNameID、model は refActorModelID に入れる値。</remarks>
+    private void DumpOne(IGameObject obj)
+    {
+        var kind = obj is IBattleNpc npc ? $"{obj.ObjectKind}/{npc.BattleNpcKind}" : $"{obj.ObjectKind}";
+        var line = $"  [{kind}] {Obj(obj)} nameId={obj.Struct()->GetNameId()} hb={obj.HitboxRadius:F2} " +
+                   $"tgt={YesNo(obj.IsTargetable)} dead={YesNo(obj.IsDead)} owner={Id(obj.OwnerId)}";
+        if (obj is ICharacter c)
+            line += $" hp={c.CurrentHp}/{c.MaxHp} " +
+                    $"model={((FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)c.Address)->ModelContainer.ModelCharaId} " +
+                    $"target={Id(c.TargetObjectId)}";
+        WriteRaw(line);
+
+        if (obj is IBattleChara b)
+        {
+            if (b.IsCasting)
+                WriteRaw($"      cast    : {ActionName(b.CastActionId)} {b.CurrentCastTime:F2}/{b.TotalCastTime:F2} " +
+                         $"-> {Id(b.CastTargetObjectId)}");
+            if (C.DumpStatuses)
+                foreach (var st in b.StatusList.Where(x => x.StatusId != 0))
+                    WriteRaw($"      status  : {StatusName(st.StatusId)} param={st.Param} " +
+                             $"remain={st.RemainingTime:F2} from={Id(st.SourceId)}");
+        }
+        if (C.DumpAttached) DumpAttached(obj);
+    }
+
+    /// <summary>Splatoon が AttachedInfo に覚えている付随情報。</summary>
+    /// <remarks>プレイヤーの共通エフェクトは量が多くギミックと無関係なので捨てる (イベント側と同じ)。
+    /// VFX は新しい順に 20 件まで。古いものまで出すと 1 回のダンプが数千行になる。</remarks>
+    private void DumpAttached(IGameObject obj)
+    {
+        var ptr = obj.Address;
+        if (AttachedInfo.CastInfos.TryGetValue(ptr, out var cast))
+            WriteRaw($"      lastCast: {ActionName(cast.ID)} age={cast.AgeF:F2}");
+        if (AttachedInfo.VFXInfos.TryGetValue(ptr, out var vfxs))
+        {
+            var shown = vfxs.Where(v => !(obj is IPlayerCharacter && v.Key.Contains("vfx/common/eff/")))
+                            .OrderBy(v => v.Value.AgeF).ToList();
+            foreach (var (path, info) in shown.Take(20)) WriteRaw($"      vfx     : {path} age={info.AgeF:F2}");
+            if (shown.Count > 20) WriteRaw($"      vfx     : (古い {shown.Count - 20} 件は省略)");
+        }
+        if (AttachedInfo.TetherInfos.TryGetValue(ptr, out var tethers))
+            foreach (var t in tethers)
+                WriteRaw($"      tether  : p=({t.Param1},{t.Param2},{t.Param3}) -> {Id(t.Target)} age={t.AgeF:F2}");
+        if (AttachedInfo.ObjectEffectInfos.TryGetValue(ptr, out var effects))
+            foreach (var e in effects)
+                WriteRaw($"      objfx   : data1={e.data1} data2={e.data2} age={e.AgeF:F2}");
+    }
+
+    /// <summary>「Dump objects now」。記録中ならそのファイルへ、戦闘外なら単発のファイルを作る。</summary>
+    private void DumpNow()
+    {
+        if (Recording) { DumpObjects("手動"); return; }
+        var check = RefreshCheck(C.LogDirectory, writeTest: true);
+        if (!check.Usable)
+        {
+            SetStatus(CheckLevel.Error, $"ダンプできない: {check.Messages.First(m => m.Level == CheckLevel.Error).Text}");
+            return;
+        }
+        if (!OpenLogFile(check, "snapshot")) return;
+        WriteHeader(Svc.ClientState.TerritoryType, "スナップショット (戦闘外)");
+        DumpObjects("手動");
+        EndTry("スナップショット");
     }
 
     /// <summary>ファイル操作を 1 回だけ試す。失敗したらこのトライの記録をやめる。</summary>
@@ -525,6 +669,14 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
     private static string Job(IGameObject? obj) =>
         obj is IPlayerCharacter pc ? pc.ClassJob.ValueNullable?.Abbreviation.ToString() ?? "?" : "";
 
+    private static string StatusName(uint id) =>
+        $"{Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Status>().GetRowOrDefault(id)?.Name.ToString() ?? "?"}({id})";
+
+    /// <summary>ID を 16 進で。0 と E0000000 (対象なし) は "-"。</summary>
+    private static string Id(ulong id) => id is 0 or 0xE0000000 ? "-" : $"0x{id:X8}";
+
+    private static string YesNo(bool value) => value ? "Y" : "N";
+
     private static string ActionName(uint id) =>
         $"{Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(id)?.Name.ToString() ?? "?"}({id})";
 
@@ -610,6 +762,23 @@ internal unsafe class ScriptEventRecorder : SplatoonScript<ScriptEventRecorder.C
     {
         ImGuiEx.Text(Color(_statusLevel), _status);
         if (Recording) ImGuiEx.Text($"経過 {_clock.Elapsed:mm\\:ss} / {_lines} 行");
+        if (ImGui.Button("Dump objects now")) DumpNow();
+        ImGuiEx.Tooltip("記録中ならそのファイルへ。戦闘外なら単発の _snapshot.log を作る");
+    }
+
+    /// <summary>オブジェクトダンプの設定。</summary>
+    private void DrawDumpSettings()
+    {
+        ImGui.Checkbox("Dump at try start", ref C.DumpOnTryStart);
+        ImGui.Checkbox("Dump on phase change", ref C.DumpOnPhaseChange);
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("Dump every (s, 0 = off)", ref C.DumpIntervalSeconds, 0f, 30f, "%.0f");
+        ImGuiEx.Tooltip("定期ダンプ。1 回で数百行になるので、短くするとファイルがすぐ大きくなる");
+        ImGui.Checkbox("Include players", ref C.DumpPlayers);
+        ImGui.Checkbox("Include event objects (towers etc.)", ref C.DumpEventObjects);
+        ImGui.Checkbox("Include other kinds", ref C.DumpOtherKinds);
+        ImGui.Checkbox("Statuses", ref C.DumpStatuses);
+        ImGui.Checkbox("VFX / tethers / object effects / last cast (Splatoon AttachedInfo)", ref C.DumpAttached);
     }
 
     /// <summary>何を書くか。ScriptEventLogger と同じ並び。</summary>
