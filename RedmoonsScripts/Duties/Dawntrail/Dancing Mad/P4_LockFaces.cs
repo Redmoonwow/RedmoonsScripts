@@ -39,7 +39,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 終わったら戻す。モジュールは詠唱中に向きを送らないので、発動の瞬間に詠唱していると効かない。
 ///
 /// 設定画面の Debug 欄は 4 タブ:
-///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)
+///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)、
+///          発動 ±2 秒の計画/送信/実際を 100ms ごとに取ったスナップショット (履歴にも残る)
 ///   記録   分身の正直/嘘つき、嘘の回に付いたデバフ、今の保持者と「今つかんだらこう判定する」
 ///   テスト 好きな人を発生源にした波を本物と同じ道で流す / Daily Routines を手で叩いて向きを確かめる
 ///   履歴   判断ログ。VerboseLog が切れていても残す
@@ -78,6 +79,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     /// <summary>発動の瞬間に取った判定 1 行。Ok = null は判定しようがない (自分 / 見えない)。</summary>
     private readonly record struct FireLine(string Text, bool? Ok);
+
+    /// <summary>発動前後のスナップショットの 1 行。Tick は TickCount64 (発動からの差は書き出すときに出す)。</summary>
+    private readonly record struct Sample(long Tick, State State, float? Planned, float? Sent, float Actual, bool Casting, bool Fire);
 
     #endregion
 
@@ -327,6 +331,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private const string FaceModule = "AutoFaceCameraDirection";
     private const float ConeHalfAngle = 45f;   // 視線の扇の半角 (度)。Satisfies の説明を参照
     private const int HistoryMax = 300;        // 履歴タブに残す行数
+    private const long SnapshotWindowMs = 2000;    // 発動の前後何 ms をスナップショットに取るか
+    private const long SnapshotIntervalMs = 100;   // スナップショットの間隔 (発動のフレームは間隔に関係なく取る)
 
     // テストタブの「〜を向く」。コンパス方位 (度、0=北の時計回り)
     private static readonly (string Label, float Bearing)[] Bearings = [("北", 0f), ("東", 90f), ("南", 180f), ("西", 270f)];
@@ -338,7 +344,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(2, "Redmoon");
+    public override Metadata Metadata => new(3, "Redmoon");
 
     #endregion
 
@@ -376,6 +382,15 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private float _testFireSeconds = 3f;
     private bool _testDryRun = true;
 
+    // ---- 発動前後のスナップショット。波とは別に回す (波を終えても発動 +2s まで取り続ける) ----
+    private long _snapFireMs;            // 記録中の発動時刻 (TickCount64)。0 = 記録していない
+    private long _lastSnapFireMs;        // 直前に書き出した発動時刻。同じ波で取り直さないため。OnReset で戻す
+    private long _lastSampleMs;
+    private bool _snapFireMarked;        // 発動のフレームを取ったか
+    private readonly List<Sample> _samples = [];
+    private string _snapHeader = "";     // 波の中身。BeginWave で埋める
+    private string _lastSnapshot = "";   // 直前に書き出したもの (Debug 表示用)
+
     // 毎フレームの走査で使い回す。フェーズ中ずっと走るので確保しない
     private readonly List<(uint EntityId, string Name, uint StatusId, float Remaining)> _holders = [];
 
@@ -393,14 +408,20 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     public override void OnSetup() => _dr.Init();
 
-    public override void OnDisable() => Finish("disable");
+    public override void OnDisable()
+    {
+        Finish("disable");
+        FlushSnapshot("disable");
+    }
 
     public override void OnReset()
     {
         Finish("reset");
+        FlushSnapshot("reset");
         _isTruth.Clear();
         _fakeStatuses.Clear();
         _lastWaveEndMs = 0;
+        _lastSnapFireMs = 0;
     }
 
     public override void OnUpdate()
@@ -408,9 +429,12 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (_state == State.None)
         {
             if (BasePlayer != null && PhaseActive) TryLatchWave();
-            return;
         }
-        Advance();
+        else
+        {
+            Advance();
+        }
+        SampleSnapshot();   // Advance の後。今フレームの計画/送信を取るため
     }
 
     public override void OnVFXSpawn(uint target, string vfxPath)
@@ -487,9 +511,10 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (_holders.Count == 0) return;
 
         var first = _holders.Min(h => h.Remaining);
-        if (first > C.LeadSeconds) return;
         var now = Environment.TickCount64;
         var endMs = now + (long)(first * 1000f);
+        if (first * 1000f <= SnapshotWindowMs) BeginSnapshot(endMs, false);   // LeadSeconds が短くても 2 秒前から取る
+        if (first > C.LeadSeconds) return;
         if (Math.Abs(endMs - _lastWaveEndMs) < 1500) return;
 
         _wave.Clear();
@@ -517,9 +542,11 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _dryRun = forceDry || Svc.Condition[ConditionFlag.DutyRecorderPlayback] || !_dr.Available;
         _state = _dryRun || _dr.IsModuleEnabled(FaceModule) == true ? State.Locked : State.Loading;
         _note = !_dryRun ? "" : forceDry ? "dry run (テスト)" : "dry run (リプレイ中か Daily Routines が無い)";
-        Log($"{origin}: 発動まで {(endMs - Environment.TickCount64) / 1000f:F2}s / " +
-            string.Join(", ", _wave.Select(w => $"{w.Name}={(w.Fake ? "嘘" : "本物")}")) +
-            $" / state={_state} dry={_dryRun}");
+        var members = string.Join(", ", _wave.Select(w => $"{w.Name}={(w.Fake ? "嘘" : "本物")}"));
+        Log($"{origin}: 発動まで {(endMs - Environment.TickCount64) / 1000f:F2}s / {members} / state={_state} dry={_dryRun}");
+
+        BeginSnapshot(endMs, true);
+        if (_snapFireMs != 0) _snapHeader = $"{origin} / {members} / dry={_dryRun}";
     }
 
     /// <summary>つかんだ波を 1 フレーム進める。モジュールの読み込み → 向きの送信 → 終了判定。</summary>
@@ -689,6 +716,71 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _plannedRotation = null;
     }
 
+    /// <summary>発動前後のスナップショットを始める。同じ波なら発動時刻だけ合わせ直す。</summary>
+    /// <remarks>TryLatchWave (先頭の残りが 2 秒を切った時点) と BeginWave の両方から呼ぶ。
+    /// TryLatchWave 側は固定を始める前から「実際」を取るため、BeginWave 側はテスト波のため。
+    /// 発動時刻は TryLatchWave が毎フレーム残り秒数から推定し直すのでぶれる。1.5 秒以内は同じ波とみなす。
+    /// 合わせ直すのは BeginWave から来たとき (align) だけ。波をつかんだ時点の値が RecordFire と同じ基準だから。
+    /// TryLatchWave 側で合わせ直すと、発動直後に残り 0 秒付近で見えるデバフが発動時刻を後ろへずらしてしまう。</remarks>
+    private void BeginSnapshot(long fireMs, bool align)
+    {
+        if (Math.Abs(fireMs - _lastSnapFireMs) < 1500) return;
+        if (_snapFireMs != 0 && Math.Abs(fireMs - _snapFireMs) < 1500)
+        {
+            if (align) _snapFireMs = fireMs;
+            return;
+        }
+
+        FlushSnapshot("次の波が来た");
+        _samples.Clear();
+        _snapFireMs = fireMs;
+        _lastSampleMs = 0;
+        _snapFireMarked = false;
+        _snapHeader = "";
+    }
+
+    /// <summary>スナップショットを 1 行取る。発動 + SnapshotWindowMs を過ぎたら書き出す。</summary>
+    /// <remarks>波を終えた後 (HoldSeconds 経過) も取り続ける。計画/送信が "-" になり、固定が外れたあとの
+    /// 「実際」が見える。</remarks>
+    private void SampleSnapshot()
+    {
+        if (_snapFireMs == 0) return;
+        var now = Environment.TickCount64;
+        if (now > _snapFireMs + SnapshotWindowMs) { FlushSnapshot("完了"); return; }
+
+        var fire = !_snapFireMarked && now >= _snapFireMs;
+        if (!fire && now - _lastSampleMs < SnapshotIntervalMs) return;
+        if (BasePlayer is not { } me) return;
+
+        _snapFireMarked |= fire;
+        _lastSampleMs = now;
+        _samples.Add(new(now, _state, _plannedRotation, _sentRotation, me.Rotation, me.IsCasting, fire));
+    }
+
+    /// <summary>取ったスナップショットを履歴 (VerboseLog なら dalamud.log にも) へ 1 件で書き出す。</summary>
+    private void FlushSnapshot(string reason)
+    {
+        if (_snapFireMs == 0) return;
+        var fireMs = _snapFireMs;
+        _snapFireMs = 0;
+        _lastSnapFireMs = fireMs;
+
+        var fireAt = DateTime.Now.AddMilliseconds(fireMs - Environment.TickCount64);
+        _lastSnapshot = $"発動前後のスナップショット: 発動 {fireAt:HH:mm:ss.fff} ({reason}, {_samples.Count} 行) {_snapHeader}\n" +
+                        string.Join("\n", _samples.Select(x => FormatSample(x, fireMs)));
+        _samples.Clear();
+        Log(_lastSnapshot);
+    }
+
+    /// <summary>スナップショット 1 行。時刻は発動からの差 (秒)、Δ計画 = 実際 − 計画。</summary>
+    private static string FormatSample(Sample x, long fireMs) =>
+        $"  {(x.Tick - fireMs) / 1000f,6:+0.00;-0.00;0.00}s  {x.State,-7}  計画 {Deg(x.Planned),7}  送信 {Deg(x.Sent),7}  " +
+        $"実際 {Deg(x.Actual),7}  Δ計画 {Delta(x.Actual, x.Planned),7}  詠唱 {(x.Casting ? "Y" : "N")}{(x.Fire ? "  ◀ 発動" : "")}";
+
+    /// <summary>実際 − 目標 を (-180, 180] の度で。目標が無ければ "-"。</summary>
+    private static string Delta(float actual, float? target) =>
+        target is { } t ? $"{MathF.IEEERemainder(actual - t, MathF.Tau) * 180f / MathF.PI:+0.0;-0.0;0.0}°" : "-";
+
     /// <summary>ユーザ向けの設定。</summary>
     private void DrawSettings()
     {
@@ -732,6 +824,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (entries.Count > 0) ImGuiEx.EzTable(entries);
         DrawRadar();
         DrawLastFire();
+        DrawSnapshot();
     }
 
     private static void ShowJudge(WaveSource src, float angle)
@@ -800,6 +893,23 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         foreach (var line in _lastFire)
             ImGuiEx.Text(line.Ok switch { true => EColor.GreenBright, false => EColor.RedBright, null => EColor.White },
                 "  " + line.Text);
+    }
+
+    /// <summary>直前に書き出したスナップショット。履歴タブにも同じものが入る。</summary>
+    private void DrawSnapshot()
+    {
+        var recording = _snapFireMs != 0 ? $"  記録中 {_samples.Count} 行" : "";
+        if (!ImGui.TreeNode($"発動前後のスナップショット ±{SnapshotWindowMs / 1000f:F0}s{recording}###P4LFSnap")) return;
+        if (_lastSnapshot == "")
+        {
+            ImGuiEx.Text("まだ無い");
+        }
+        else
+        {
+            if (ImGui.Button("コピー##snap")) GenericHelpers.Copy(_lastSnapshot);
+            ImGuiEx.Text(_lastSnapshot);
+        }
+        ImGui.TreePop();
     }
 
     // ---- Debug: 記録 ---------------------------------------------------------
