@@ -109,8 +109,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float HoldSeconds = 1.0f;   // 視線の何秒後まで固定を続けるか
         public bool UnloadAfter = true;    // 自分で読み込んだモジュールを、終わったら戻すか
         public bool VerboseLog;            // 波をつかむ/固定する/外すたびにログを残す
-        public string LockStartCommands = "";   // 固定を始めたときに打つチャットコマンド。1 行 1 コマンド
-        public string LockEndCommands = "";     // 固定を解いたときに打つチャットコマンド
+        public string LockStartCommands = "/aestop";   // 固定を始めたときに打つチャットコマンド。1 行 1 コマンド
+        public string LockEndCommands = "/aestop";     // 固定を解いたときに打つチャットコマンド
 
         // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
         public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
@@ -435,7 +435,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(6, "Redmoon");
+    public override Metadata Metadata => new(7, "Redmoon");
 
     #endregion
 
