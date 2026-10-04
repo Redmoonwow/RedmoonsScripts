@@ -2,6 +2,7 @@
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Interface.Windowing;
 using ECommons;
+using ECommons.Automation;
 using ECommons.DalamudServices;
 using ECommons.EzIpcManager;
 using ECommons.Hooks.ActionEffectTypes;
@@ -43,6 +44,9 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 呪詛の叫声が付いている間は、真上から見たレーダーを枠なしの別ウィンドウで出す (全員のデバフが消えたら消える)。
 /// 波をつかむ前から「次の波」を仮に組んで、計画の扇まで描く。普段はクリックを素通りさせる。
 /// 位置・大きさ・不透明度は Debug の「レーダー」で。デザインモードの間だけダミーを出し、ドラッグで動かせる。
+///
+/// 固定を始めたとき / 解いたときに、設定に書いたチャットコマンドを打てる (1 行 1 コマンド)。
+/// dry run (リプレイ・Daily Routines 無し・テスト) では打たずに履歴へ残すだけ。
 ///
 /// 設定画面の Debug 欄は 5 タブ:
 ///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)、
@@ -105,6 +109,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float HoldSeconds = 1.0f;   // 視線の何秒後まで固定を続けるか
         public bool UnloadAfter = true;    // 自分で読み込んだモジュールを、終わったら戻すか
         public bool VerboseLog;            // 波をつかむ/固定する/外すたびにログを残す
+        public string LockStartCommands = "";   // 固定を始めたときに打つチャットコマンド。1 行 1 コマンド
+        public string LockEndCommands = "";     // 固定を解いたときに打つチャットコマンド
 
         // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
         public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
@@ -429,7 +435,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(5, "Redmoon");
+    public override Metadata Metadata => new(6, "Redmoon");
 
     #endregion
 
@@ -455,6 +461,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private float? _plannedRotation;     // 今フレームに計算した向き (Debug 用)
     private string _note = "";           // 直近の判断 (Debug 用)
     private bool _fired;                 // 発動の瞬間の判定を取ったか
+    private bool _lockStarted;           // 固定を始めた (開始コマンドを打った) か。解除コマンドを打つかの判断に使う
 
     // ---- 波をまたいで残す。OnReset で戻す ------------------------------------
     private long _lastWaveEndMs;         // 直前に処理した波。切れかけのデバフでつかみ直さないため
@@ -665,6 +672,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _loadedByUs = false;
         _sentRotation = null;
         _fired = false;
+        _lockStarted = false;
         _dryRun = forceDry || Svc.Condition[ConditionFlag.DutyRecorderPlayback] || !_dr.Available;
         _state = _dryRun || _dr.IsModuleEnabled(FaceModule) == true ? State.Locked : State.Loading;
         _note = !_dryRun ? "" : forceDry ? "dry run (テスト)" : "dry run (リプレイ中か Daily Routines が無い)";
@@ -692,11 +700,47 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         // 読み込み待ちでも計算はする。Debug で「何を向くつもりか」を先に見られるように
         _plannedRotation = ComputeFacing(_wave);
         if (!_fired && now >= _waveEndMs) RecordFire();
-        if (_state != State.Locked || _dryRun || _plannedRotation is not { } rotation) return;
+        if (_state != State.Locked || _plannedRotation is not { } rotation) return;
+        if (_dryRun)
+        {
+            // 送らないが、固定を始めたはずの瞬間は同じに取る (開始コマンドを履歴に残す)
+            if (!_lockStarted) StartLock();
+            return;
+        }
 
         // 0.01 rad (約 0.6°) 未満の変化は送らない。IPC とモジュールの書き戻しを毎フレーム起こさないため
         if (_sentRotation is { } prev && MathF.Abs(MathF.IEEERemainder(rotation - prev, MathF.Tau)) < 0.01f) return;
-        if (_dr.LockFacingOnChara(rotation)) _sentRotation = rotation;
+        if (!_dr.LockFacingOnChara(rotation)) return;
+        _sentRotation = rotation;
+        if (!_lockStarted) StartLock();
+    }
+
+    /// <summary>固定を始めた。最初の向きが送れた瞬間 (dry run なら送るはずだった瞬間) に 1 回だけ呼ぶ。</summary>
+    private void StartLock()
+    {
+        _lockStarted = true;
+        RunCommands("固定開始", C.LockStartCommands);
+    }
+
+    /// <summary>設定のコマンドを上から 1 行ずつ打つ。空行と # で始まる行は飛ばす。</summary>
+    /// <remarks>
+    /// dry run とリプレイ中は打たずに履歴へ残すだけ。録画を見ているだけで実機のチャットが動くと事故になる。
+    /// / で始まらない行は打たない。Chat.ExecuteCommand は例外を投げるし、SendMessage に回すと
+    /// ただの発言として今のチャンネルに流れてしまうため。
+    /// 同じフレームで続けて打つ。数行なら問題ないが、待ちが要るコマンド (/wait など) はマクロ専用で効かない。
+    /// </remarks>
+    private void RunCommands(string when, string commands)
+    {
+        var replay = _dryRun || Svc.Condition[ConditionFlag.DutyRecorderPlayback];
+        foreach (var raw in commands.Split('\n'))   // CRLF の \r は Trim が落とす
+        {
+            var line = raw.Trim();
+            if (line == "" || line.StartsWith('#')) continue;
+            if (!line.StartsWith('/')) { Log($"{when}: / で始まらないので打たない: {line}"); continue; }
+            if (replay) { Log($"{when}: dry run なので打たない: {line}"); continue; }
+            Chat.ExecuteCommand(line);
+            Log($"{when}: {line}");
+        }
     }
 
     /// <summary>モジュールが切れていれば読み込み、立ち上がったら Locked に進める。</summary>
@@ -873,6 +917,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (!_dryRun) _dr.CancelFacingLock();
         if (_loadedByUs && C.UnloadAfter) _dr.UnloadModule(FaceModule);
         Log($"波を終えた ({reason})。unload={_loadedByUs && C.UnloadAfter}");
+        if (_lockStarted) RunCommands("固定解除", C.LockEndCommands);   // 始めていない波 (読み込み失敗など) では打たない
+        _lockStarted = false;
 
         _state = State.None;
         _wave.Clear();
@@ -963,6 +1009,12 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGui.Checkbox("Unload AutoFaceCameraDirection after", ref C.UnloadAfter);
         ImGuiEx.Tooltip("自分で読み込んだときだけ戻す。元から有効にしていたなら触らない");
         ImGui.Checkbox("Verbose log", ref C.VerboseLog);
+
+        ImGuiEx.Text("固定を始めたときに打つコマンド (1 行 1 コマンド、# で始まる行は無視)");
+        ImGui.InputTextMultiline("##LockStartCommands", ref C.LockStartCommands, 2000, new Vector2(400f, 60f));
+        ImGuiEx.Text("固定を解いたときに打つコマンド");
+        ImGui.InputTextMultiline("##LockEndCommands", ref C.LockEndCommands, 2000, new Vector2(400f, 60f));
+        ImGuiEx.Text(EColor.YellowBright, "リプレイ中・dry run では打たずに履歴へ残すだけ。/ で始まらない行は打たない");
         ImGuiEx.Text(EColor.YellowBright, "発動の瞬間に詠唱していると向きが送られない (モジュールの仕様)");
     }
 
