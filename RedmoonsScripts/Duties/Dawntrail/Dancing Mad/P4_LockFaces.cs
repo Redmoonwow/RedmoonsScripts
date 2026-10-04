@@ -41,12 +41,13 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 終わったら戻す。モジュールは詠唱中に向きを送らないので、発動の瞬間に詠唱していると効かない。
 ///
 /// 呪詛の叫声が付いている間は、真上から見たレーダーを枠なしの別ウィンドウで出す (全員のデバフが消えたら消える)。
-/// 波をつかむ前から「次の波」を仮に組んで、計画の扇まで描く。位置・大きさ・不透明度は Debug の「レーダー」で。
+/// 波をつかむ前から「次の波」を仮に組んで、計画の扇まで描く。普段はクリックを素通りさせる。
+/// 位置・大きさ・不透明度は Debug の「レーダー」で。デザインモードの間だけダミーを出し、ドラッグで動かせる。
 ///
 /// 設定画面の Debug 欄は 5 タブ:
 ///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)、
 ///          発動 ±2 秒の計画/送信/実際を 100ms ごとに取ったスナップショット (履歴にも残る)
-///   レーダー 別ウィンドウのレーダーの表示/位置固定/大きさ/不透明度、位置合わせ
+///   レーダー 別ウィンドウのレーダーの表示/大きさ/不透明度、デザインモード (ダミー表示で位置合わせ)
 ///   記録   分身の正直/嘘つき、嘘の回に付いたデバフ、今の保持者と「今つかんだらこう判定する」
 ///   テスト 好きな人を発生源にした波を本物と同じ道で流す / Daily Routines を手で叩いて向きを確かめる
 ///   履歴   判断ログ。VerboseLog が切れていても残す
@@ -87,6 +88,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private readonly record struct FireLine(string Text, bool? Ok);
 
     /// <summary>発動前後のスナップショットの 1 行。Tick は TickCount64 (発動からの差は書き出すときに出す)。</summary>
+    /// <summary>レーダーの点 1 つ。Offset は自分からの (X, Z) [m]。Later = 次の波より後の組 (灰色)。</summary>
+    private readonly record struct RadarPoint(Vector2 Offset, bool Fake, bool Later, bool IsSelf, string Label);
+
     private readonly record struct Sample(long Tick, State State, float? Planned, float? Sent, float Actual, bool Casting, bool Fire);
 
     #endregion
@@ -104,7 +108,6 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
         // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
         public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
-        public bool RadarLocked;                               // 位置を固定し、クリックを素通りさせる
         public Vector2 RadarPosition = DefaultRadarPosition;   // 画面上の左上の位置
         public float RadarSize = 220f;                         // 一辺 (px)
         public float RadarOpacity = 0.8f;                      // 全体の不透明度 (0.1〜1)
@@ -113,7 +116,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// <summary>レーダーだけを出す枠なしのウィンドウ。</summary>
     /// <remarks>ECommons の EzConfigGui が持つ Dalamud の WindowSystem に載せる (公式の P3 Dive from Grace Neo と同じやり方)。
     /// OnEnable で作って OnDisable で外す。外し忘れると、スクリプトを無効にしても枠が残る。
+    /// Dancing Mad の外でもデザインモードを入れたときだけは作る (EnsureRadarWindow)。
     /// 出すかどうかは毎フレーム DrawConditions で決める (IsOpen は開けっぱなし)。
+    /// 普段は NoInputs でクリックを素通りさせ、デザインモードの間だけドラッグで動かせる。
     /// ドラッグで動いた位置は C.RadarPosition に書き戻す。設定ファイルへの保存は、Splatoon が
     /// スクリプトを無効にするとき (エリア移動など) と設定画面を閉じるときに行われる。</remarks>
     private sealed class RadarWindow : Window, IDisposable
@@ -148,7 +153,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public override void PreDraw()
         {
             var c = _script.C;
-            Flags = BaseFlags | (c.RadarLocked ? ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoInputs : ImGuiWindowFlags.None);
+            Flags = BaseFlags | (_script.DesignActive ? ImGuiWindowFlags.None : ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoInputs);
             Position = c.RadarPosition;
             PositionCondition = _script._radarForcePosition ? ImGuiCond.Always : ImGuiCond.FirstUseEver;
             _script._radarForcePosition = false;
@@ -161,7 +166,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public override void Draw()
         {
             var c = _script.C;
-            _script.DrawRadarCanvas(c.RadarSize, c.RadarOpacity);
+            _script.DrawRadarCanvas(c.RadarSize, c.RadarOpacity, _script.DesignActive);
             c.RadarPosition = ImGui.GetWindowPos();
         }
     }
@@ -405,6 +410,15 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private const float GroupSeconds = 2f;         // 先頭からこの秒数以内に切れる人を同じ波にする
     private static readonly Vector2 DefaultRadarPosition = new(100f, 300f);
 
+    // デザインモードのダミー。次の組 2 人 (嘘 = 見る) と後の組 2 人。実際の配置に近い距離にしてある
+    private static readonly RadarPoint[] DummyPoints =
+    [
+        new(new Vector2(6f, -8f), true, false, false, "Dummy A"),
+        new(new Vector2(-7f, -4f), true, false, false, "Dummy B"),
+        new(new Vector2(5f, 9f), false, true, false, "9s"),
+        new(new Vector2(-9f, 6f), false, true, false, "9s"),
+    ];
+
     // テストタブの「〜を向く」。コンパス方位 (度、0=北の時計回り)
     private static readonly (string Label, float Bearing)[] Bearings = [("北", 0f), ("東", 90f), ("南", 180f), ("西", 270f)];
 
@@ -415,7 +429,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(4, "Redmoon");
+    public override Metadata Metadata => new(5, "Redmoon");
 
     #endregion
 
@@ -468,7 +482,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private readonly List<(uint EntityId, float Remaining)> _radarLater = [];   // 次の波より後に切れる保持者
     private float? _radarPlanned;        // 計画の向き。波の最中は _plannedRotation、その前は _preview から計算
     private float? _radarCountdown;      // 次の発動まで (秒)
-    private bool _radarPreviewRequested; // Debug の「位置合わせ」。デバフが無くても出す
+    private readonly List<RadarPoint> _radarPoints = [];   // CollectRadarPoints が毎フレーム使い回す
+    private bool _radarDesign;           // デザインモード。ダミーを出してドラッグで動かせる
+    private long _lastSettingsDrawMs;    // 設定画面を最後に描いた時刻。閉じたらデザインモードを消すため
     private bool _radarForcePosition;    // 次のフレームで設定の位置へ戻す
 
     // 毎フレームの走査で使い回す。フェーズ中ずっと走るので確保しない
@@ -482,7 +498,12 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     /// <summary>レーダーのウィンドウを出すか。呪詛の叫声が誰かに付いてから、全員のぶんが消えて波を終えるまで。</summary>
     private bool RadarVisible =>
-        BasePlayer != null && (_radarPreviewRequested || C.ShowRadar && (_state != State.None || _holders.Count > 0));
+        BasePlayer != null && (DesignActive || C.ShowRadar && IsEnabled && (_state != State.None || _holders.Count > 0));
+
+    /// <summary>デザインモードが効いているか。設定画面を閉じると (描かれなくなると) 1 秒で切れる。</summary>
+    /// <remarks>設定画面の描画で判定しているので、スクリプトを読み直して古いインスタンスが残っても、
+    /// その古いウィンドウはここが false になって出なくなる。</remarks>
+    private bool DesignActive => _radarDesign && Environment.TickCount64 - _lastSettingsDrawMs < 1000;
 
     #endregion
 
@@ -495,7 +516,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     public override void OnSetup() => _dr.Init();
 
-    public override void OnEnable() => _radarWindow = new(this);
+    public override void OnEnable() => EnsureRadarWindow();
 
     public override void OnDisable()
     {
@@ -503,7 +524,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         FlushSnapshot("disable");
         _radarWindow?.Dispose();
         _radarWindow = null;
-        _radarPreviewRequested = false;
+        _holders.Clear();
     }
 
     public override void OnReset()
@@ -569,6 +590,11 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     public override void OnSettingsDraw()
     {
+        // 一度閉じてから開き直したなら、デザインモードは切っておく (開きっぱなしの事故を防ぐ)
+        var now = Environment.TickCount64;
+        if (now - _lastSettingsDrawMs > 1000) _radarDesign = false;
+        _lastSettingsDrawMs = now;
+
         DrawSettings();
         if (!ImGuiEx.CollapsingHeader("Debug")) return;
         ImGuiEx.EzTabBar("##P4LFDebug",
@@ -963,7 +989,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         }
         if (entries.Count > 0) ImGuiEx.EzTable(entries);
         if (BasePlayer == null) ImGuiEx.Text("レーダー: 自分が居ない");
-        else DrawRadarCanvas(240f, 1f);
+        else DrawRadarCanvas(240f, 1f, false);
         ImGuiEx.Text($"緑=嘘 (見る) / 赤=本物 (見ない) / 灰=後の組 / 水色=計画の扇 ±{ConeHalfAngle:F0}° / 黄=実際の向き");
         DrawLastFire();
         DrawSnapshot();
@@ -979,13 +1005,14 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     /// <summary>真上から見た図。北が上、自分が中心。Debug の「現在」とレーダーのウィンドウで共用する。</summary>
     /// <remarks>ゲームの X=東 / Z=南 を画面の右 / 下にそのまま置く。だから Z を反転しない。
-    /// 縮尺は一番遠い保持者が外周の 9 割に来るように合わせる (最低 10m)。
-    /// 中身は UpdateRadar が毎フレーム作る。色の不透明度は全部 opacity 倍する。</remarks>
-    private void DrawRadarCanvas(float size, float opacity)
+    /// 縮尺は一番遠い点が外周の 9 割に来るように合わせる (最低 10m)。色の不透明度は全部 opacity 倍する。
+    /// dummy なら DummyPoints を出す (デザインモード)。黄色の線 (実際の向き) だけは本物の自分の向き。</remarks>
+    private void DrawRadarCanvas(float size, float opacity, bool dummy)
     {
         if (BasePlayer is not { } me) return;
-        var myPos = new Vector2(me.Position.X, me.Position.Z);
-        var range = RadarRange(myPos);
+        IReadOnlyList<RadarPoint> points = dummy ? DummyPoints : CollectRadarPoints(new Vector2(me.Position.X, me.Position.Z), me.EntityId);
+        var planned = dummy ? DummyPlanned() : _radarPlanned;
+        var range = MathF.Max(10f, points.Count == 0 ? 0f : points.Max(p => p.Offset.Length()) / 0.9f);
         var origin = ImGui.GetCursorScreenPos();
         var center = origin + new Vector2(size / 2f);
         var radius = size / 2f - 14f;
@@ -995,57 +1022,78 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         dl.AddCircle(center, radius, Col(EColor.White, 0.3f * opacity));
         dl.AddText(center + new Vector2(-4f, -radius - 13f), Col(EColor.White, opacity), "N");
         dl.AddText(origin + new Vector2(6f, size - 18f), Col(EColor.White, 0.5f * opacity), $"{range:F0}m");
-        if (_radarPlanned is { } planned) DrawCone(dl, center, radius, planned, opacity);
+        if (planned is { } r) DrawCone(dl, center, radius, r, opacity);
         dl.AddLine(center, center + FacingOf(me.Rotation) * radius, Col(EColor.YellowBright, opacity), 2f);
 
-        DrawRadarDots(dl, center, radius / range, myPos, me.EntityId, opacity);
-        DrawRadarCaption(dl, origin + new Vector2(6f, 4f), me.EntityId, opacity);
+        DrawRadarPoints(dl, center, radius / range, points, opacity);
+        DrawRadarCaption(dl, origin + new Vector2(6f, 4f), points, dummy ? 3.2f : _radarCountdown, dummy, opacity);
+        if (dummy) DrawDesignFrame(dl, origin, size);
         ImGui.Dummy(new Vector2(size));
     }
 
-    /// <summary>外周が何 m か。一番遠い保持者が外周の 9 割に来るように、最低 10m。</summary>
-    private float RadarRange(Vector2 myPos)
+    /// <summary>レーダーに出す点を今の状態から集める。毎フレーム同じリストを使い回す。</summary>
+    private List<RadarPoint> CollectRadarPoints(Vector2 myPos, uint myId)
     {
-        var range = 10f;
-        foreach (var id in RadarSources.Select(x => x.EntityId).Concat(_radarLater.Select(x => x.EntityId)))
-            if (id.GetObject() is { } o)
-                range = MathF.Max(range, Vector2.Distance(new Vector2(o.Position.X, o.Position.Z), myPos) / 0.9f);
-        return range;
-    }
+        Vector2 Offset(Vector3 p) => new(p.X - myPos.X, p.Z - myPos.Y);
 
-    /// <summary>保持者の点。次の波は緑 (嘘) / 赤 (本物)、後の組は灰色に残り秒数。自分が保持者なら中心に輪。</summary>
-    private void DrawRadarDots(ImDrawListPtr dl, Vector2 center, float scale, Vector2 myPos, uint myId, float opacity)
-    {
-        Vector2 ToScreen(Vector3 p) => center + (new Vector2(p.X, p.Z) - myPos) * scale;
-
+        _radarPoints.Clear();
         foreach (var (id, remaining) in _radarLater)
-        {
-            if (id.GetObject() is not { } o) continue;
-            var p = ToScreen(o.Position);
-            dl.AddCircleFilled(p, 4f, Col(EColor.White, 0.35f * opacity));
-            dl.AddText(p + new Vector2(6f, -7f), Col(EColor.White, 0.5f * opacity), $"{remaining:F0}s");
-        }
+            if (id.GetObject() is { } o)
+                _radarPoints.Add(new(Offset(o.Position), false, true, false, $"{remaining:F0}s"));
         foreach (var src in RadarSources)
         {
-            var color = Col(src.Fake ? EColor.GreenBright : EColor.RedBright, opacity);
-            if (src.EntityId == myId) { dl.AddCircle(center, 9f, color, 0, 2f); continue; }
-            if (src.EntityId.GetObject() is not { } o) continue;
-            var p = ToScreen(o.Position);
-            dl.AddCircleFilled(p, 5f, color);
-            dl.AddText(p + new Vector2(7f, -7f), Col(EColor.White, opacity), src.Name.Length > 8 ? src.Name[..8] : src.Name);
+            if (src.EntityId == myId) { _radarPoints.Add(new(Vector2.Zero, src.Fake, false, true, "")); continue; }
+            if (src.EntityId.GetObject() is { } o)
+                _radarPoints.Add(new(Offset(o.Position), src.Fake, false, false, src.Name.Length > 8 ? src.Name[..8] : src.Name));
+        }
+        return _radarPoints;
+    }
+
+    /// <summary>ダミーの計画。次の組 (Later でない点) への二等分線。ComputeFacing の「見る」と同じ作り。</summary>
+    private static float DummyPlanned()
+    {
+        var sum = DummyPoints.Where(p => !p.Later).Aggregate(Vector2.Zero, (a, p) => a + Vector2.Normalize(p.Offset));
+        return MathF.Atan2(sum.X, sum.Y);
+    }
+
+    /// <summary>点を描く。後の組は灰色に残り秒数、次の組は緑 (嘘) / 赤 (本物)、自分が保持者なら中心に輪。</summary>
+    private static void DrawRadarPoints(ImDrawListPtr dl, Vector2 center, float scale, IReadOnlyList<RadarPoint> points, float opacity)
+    {
+        foreach (var p in points.Where(x => x.Later))
+        {
+            var pos = center + p.Offset * scale;
+            dl.AddCircleFilled(pos, 4f, Col(EColor.White, 0.35f * opacity));
+            dl.AddText(pos + new Vector2(6f, -7f), Col(EColor.White, 0.5f * opacity), p.Label);
+        }
+        foreach (var p in points.Where(x => !x.Later))
+        {
+            var color = Col(p.Fake ? EColor.GreenBright : EColor.RedBright, opacity);
+            if (p.IsSelf) { dl.AddCircle(center, 9f, color, 0, 2f); continue; }
+            var pos = center + p.Offset * scale;
+            dl.AddCircleFilled(pos, 5f, color);
+            dl.AddText(pos + new Vector2(7f, -7f), Col(EColor.White, opacity), p.Label);
         }
         dl.AddCircleFilled(center, 4f, Col(EColor.White, opacity));
     }
 
     /// <summary>左上の文字。次の発動まで何秒か、見るのか見ないのか、固定中か。</summary>
     /// <remarks>見る/見ないは自分以外の発生源で決める (自分の視線は自分に当たらない)。</remarks>
-    private void DrawRadarCaption(ImDrawListPtr dl, Vector2 pos, uint myId, float opacity)
+    private void DrawRadarCaption(ImDrawListPtr dl, Vector2 pos, IReadOnlyList<RadarPoint> points, float? countdown, bool dummy, float opacity)
     {
-        if (_radarCountdown is not { } countdown || !RadarSources.Any(x => x.EntityId != myId)) return;
-        var look = RadarSources.Any(x => x.Fake && x.EntityId != myId);
-        var mode = _state == State.None ? "" : _dryRun ? "  計算のみ" : "  固定中";
+        var sources = points.Where(x => !x.Later && !x.IsSelf).ToList();
+        if (countdown is not { } seconds || sources.Count == 0) return;
+        var look = sources.Any(x => x.Fake);
+        var mode = dummy ? "  デザイン" : _state == State.None ? "" : _dryRun ? "  計算のみ" : "  固定中";
         dl.AddText(pos, Col(look ? EColor.GreenBright : EColor.RedBright, opacity),
-            $"{MathF.Max(countdown, 0f):F1}s  {(look ? "見る" : "見ない")}{mode}");
+            $"{MathF.Max(seconds, 0f):F1}s  {(look ? "見る" : "見ない")}{mode}");
+    }
+
+    /// <summary>デザインモードの印。動かせることが分かるように黄色の枠と案内を出す。不透明度は掛けない。</summary>
+    private static void DrawDesignFrame(ImDrawListPtr dl, Vector2 origin, float size)
+    {
+        dl.AddRect(origin, origin + new Vector2(size), EColor.YellowBright.ToUint(), 6f, ImDrawFlags.None, 2f);
+        const string hint = "ドラッグで移動";
+        dl.AddText(origin + new Vector2(size - ImGui.CalcTextSize(hint).X - 6f, size - 18f), EColor.YellowBright.ToUint(), hint);
     }
 
     /// <summary>計画の向きの扇 (±ConeHalfAngle) を塗る。</summary>
@@ -1095,31 +1143,33 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     // ---- Debug: レーダー -------------------------------------------------------
 
     /// <summary>別ウィンドウのレーダーの設定と位置合わせ。</summary>
-    /// <remarks>位置を固定していない間はドラッグで動かせるが、その場所のクリックはゲームに届かない。
-    /// 置いたら固定する (NoInputs でクリックを素通りさせる)。</remarks>
+    /// <remarks>デザインモードの間だけダミーを出し、ドラッグで動かせる。その間はレーダーの上のクリックが
+    /// ゲームに届かない。設定画面を閉じるとデザインモードは切れ、クリックを素通りさせる状態に戻る。</remarks>
     private void DrawRadarTab()
     {
         ImGui.Checkbox("デバフが付いている間レーダーを出す", ref C.ShowRadar);
-        ImGui.Checkbox("位置を固定 (クリックを素通りさせる)", ref C.RadarLocked);
-        ImGuiEx.Tooltip("外すとドラッグで動かせる。外している間、レーダーの上のクリックはゲームに届かない");
         ImGui.SetNextItemWidth(150f);
         ImGui.SliderFloat("不透明度", ref C.RadarOpacity, 0.1f, 1f, "%.2f");
         ImGui.SetNextItemWidth(150f);
         ImGui.SliderFloat("大きさ (px)", ref C.RadarSize, 120f, 480f, "%.0f");
-        ImGuiEx.Text($"位置: {C.RadarPosition.X:F0}, {C.RadarPosition.Y:F0}");
 
-        if (!IsEnabled) ImGuiEx.Text(EColor.RedBright, "スクリプトが有効でない (Dancing Mad の外)。ウィンドウが無いので出せない");
-        ImGui.BeginDisabled(!IsEnabled);
-        if (ImGui.Button(_radarPreviewRequested ? "位置合わせを終える" : "位置合わせ (デバフが無くても出す)"))
-            _radarPreviewRequested = !_radarPreviewRequested;
+        if (ImGui.Checkbox("デザインモード (ダミーを出してドラッグで動かす)", ref _radarDesign) && _radarDesign)
+            EnsureRadarWindow();
+        ImGuiEx.Tooltip("設定画面を閉じると切れる。普段のレーダーはクリックを素通りさせ、動かせない");
+        ImGuiEx.Text($"位置: {C.RadarPosition.X:F0}, {C.RadarPosition.Y:F0}");
         ImGui.SameLine();
-        if (ImGui.Button("位置を初期値に戻す"))
+        if (ImGui.Button("初期位置に戻す"))
         {
             C.RadarPosition = DefaultRadarPosition;
             _radarForcePosition = true;
         }
-        ImGui.EndDisabled();
     }
+
+    /// <summary>レーダーのウィンドウが無ければ作る。</summary>
+    /// <remarks>OnEnable と、デザインモードを入れたときに呼ぶ。後者は Dancing Mad の外 (スクリプトが無効) でも
+    /// 位置合わせできるようにするため。外は OnDisable が担う。無効のまま作ったものは OnDisable が来ないので残るが、
+    /// DesignActive が切れれば何も出さない。</remarks>
+    private void EnsureRadarWindow() => _radarWindow ??= new RadarWindow(this);
 
     // ---- Debug: 記録 ---------------------------------------------------------
 
