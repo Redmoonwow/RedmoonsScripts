@@ -1,11 +1,13 @@
 ﻿using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Interface.Windowing;
 using ECommons;
 using ECommons.DalamudServices;
 using ECommons.EzIpcManager;
 using ECommons.Hooks.ActionEffectTypes;
 using ECommons.ImGuiMethods;
 using ECommons.Logging;
+using ECommons.SimpleGui;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using Splatoon.Memory;
 using Splatoon.SplatoonScripting;
@@ -38,9 +40,13 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// いるあいだ常にキャラをカメラ方向へ向け続けるので、普段は切っておき、波のときだけ読み込んで
 /// 終わったら戻す。モジュールは詠唱中に向きを送らないので、発動の瞬間に詠唱していると効かない。
 ///
-/// 設定画面の Debug 欄は 4 タブ:
+/// 呪詛の叫声が付いている間は、真上から見たレーダーを枠なしの別ウィンドウで出す (全員のデバフが消えたら消える)。
+/// 波をつかむ前から「次の波」を仮に組んで、計画の扇まで描く。位置・大きさ・不透明度は Debug の「レーダー」で。
+///
+/// 設定画面の Debug 欄は 5 タブ:
 ///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)、
 ///          発動 ±2 秒の計画/送信/実際を 100ms ごとに取ったスナップショット (履歴にも残る)
+///   レーダー 別ウィンドウのレーダーの表示/位置固定/大きさ/不透明度、位置合わせ
 ///   記録   分身の正直/嘘つき、嘘の回に付いたデバフ、今の保持者と「今つかんだらこう判定する」
 ///   テスト 好きな人を発生源にした波を本物と同じ道で流す / Daily Routines を手で叩いて向きを確かめる
 ///   履歴   判断ログ。VerboseLog が切れていても残す
@@ -95,6 +101,69 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float HoldSeconds = 1.0f;   // 視線の何秒後まで固定を続けるか
         public bool UnloadAfter = true;    // 自分で読み込んだモジュールを、終わったら戻すか
         public bool VerboseLog;            // 波をつかむ/固定する/外すたびにログを残す
+
+        // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
+        public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
+        public bool RadarLocked;                               // 位置を固定し、クリックを素通りさせる
+        public Vector2 RadarPosition = DefaultRadarPosition;   // 画面上の左上の位置
+        public float RadarSize = 220f;                         // 一辺 (px)
+        public float RadarOpacity = 0.8f;                      // 全体の不透明度 (0.1〜1)
+    }
+
+    /// <summary>レーダーだけを出す枠なしのウィンドウ。</summary>
+    /// <remarks>ECommons の EzConfigGui が持つ Dalamud の WindowSystem に載せる (公式の P3 Dive from Grace Neo と同じやり方)。
+    /// OnEnable で作って OnDisable で外す。外し忘れると、スクリプトを無効にしても枠が残る。
+    /// 出すかどうかは毎フレーム DrawConditions で決める (IsOpen は開けっぱなし)。
+    /// ドラッグで動いた位置は C.RadarPosition に書き戻す。設定ファイルへの保存は、Splatoon が
+    /// スクリプトを無効にするとき (エリア移動など) と設定画面を閉じるときに行われる。</remarks>
+    private sealed class RadarWindow : Window, IDisposable
+    {
+        private const ImGuiWindowFlags BaseFlags =
+            ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
+            ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav |
+            ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoCollapse;
+
+        private readonly P4_LockFaces _script;
+
+        public RadarWindow(P4_LockFaces script) : base("P4 LockFaces Radar###P4LFRadar", BaseFlags, true)
+        {
+            _script = script;
+            IsOpen = true;
+            ShowCloseButton = false;
+            RespectCloseHotkey = false;
+            AllowPinning = false;
+            AllowClickthrough = false;
+            DisableWindowSounds = true;
+            DisableFadeInFadeOut = true;
+            BgAlpha = 0f;   // 背景はレーダー自身が描く (不透明度を効かせるため)
+            EzConfigGui.WindowSystem.AddWindow(this);
+        }
+
+        public void Dispose() => EzConfigGui.WindowSystem.RemoveWindow(this);
+
+        public override bool DrawConditions() => _script.RadarVisible;
+
+        /// <remarks>位置は初回だけ設定値から置く (FirstUseEver)。以降は ImGui が覚えている位置を使い、
+        /// 「位置を初期値に戻す」が押されたフレームだけ Always で上書きする。</remarks>
+        public override void PreDraw()
+        {
+            var c = _script.C;
+            Flags = BaseFlags | (c.RadarLocked ? ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoInputs : ImGuiWindowFlags.None);
+            Position = c.RadarPosition;
+            PositionCondition = _script._radarForcePosition ? ImGuiCond.Always : ImGuiCond.FirstUseEver;
+            _script._radarForcePosition = false;
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+        }
+
+        public override void PostDraw() => ImGui.PopStyleVar(2);
+
+        public override void Draw()
+        {
+            var c = _script.C;
+            _script.DrawRadarCanvas(c.RadarSize, c.RadarOpacity);
+            c.RadarPosition = ImGui.GetWindowPos();
+        }
     }
 
     /// <summary>Daily Routines の IPC をまとめたもの。これだけコピーすれば動く。</summary>
@@ -333,6 +402,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private const int HistoryMax = 300;        // 履歴タブに残す行数
     private const long SnapshotWindowMs = 2000;    // 発動の前後何 ms をスナップショットに取るか
     private const long SnapshotIntervalMs = 100;   // スナップショットの間隔 (発動のフレームは間隔に関係なく取る)
+    private const float GroupSeconds = 2f;         // 先頭からこの秒数以内に切れる人を同じ波にする
+    private static readonly Vector2 DefaultRadarPosition = new(100f, 300f);
 
     // テストタブの「〜を向く」。コンパス方位 (度、0=北の時計回り)
     private static readonly (string Label, float Bearing)[] Bearings = [("北", 0f), ("東", 90f), ("南", 180f), ("西", 270f)];
@@ -344,7 +415,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(3, "Redmoon");
+    public override Metadata Metadata => new(4, "Redmoon");
 
     #endregion
 
@@ -391,11 +462,27 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private string _snapHeader = "";     // 波の中身。BeginWave で埋める
     private string _lastSnapshot = "";   // 直前に書き出したもの (Debug 表示用)
 
+    // ---- レーダー。UpdateRadar が毎フレーム作り直し、ウィンドウと Debug が読む ----
+    private RadarWindow? _radarWindow;   // OnEnable で作り OnDisable で外す
+    private readonly List<WaveSource> _preview = [];   // 波をつかむ前に「次の波」を仮に組んだもの
+    private readonly List<(uint EntityId, float Remaining)> _radarLater = [];   // 次の波より後に切れる保持者
+    private float? _radarPlanned;        // 計画の向き。波の最中は _plannedRotation、その前は _preview から計算
+    private float? _radarCountdown;      // 次の発動まで (秒)
+    private bool _radarPreviewRequested; // Debug の「位置合わせ」。デバフが無くても出す
+    private bool _radarForcePosition;    // 次のフレームで設定の位置へ戻す
+
     // 毎フレームの走査で使い回す。フェーズ中ずっと走るので確保しない
     private readonly List<(uint EntityId, string Name, uint StatusId, float Remaining)> _holders = [];
 
     /// <summary>ケフカ本体が居て殴れる = このフェーズの最中。</summary>
     private bool PhaseActive => Svc.Objects.Any(x => x.BaseId == 18475 && x.IsTargetable);
+
+    /// <summary>レーダーに点で出す発生源。波をつかんでいればその波、まだなら次の波の仮組み。</summary>
+    private List<WaveSource> RadarSources => _state != State.None ? _wave : _preview;
+
+    /// <summary>レーダーのウィンドウを出すか。呪詛の叫声が誰かに付いてから、全員のぶんが消えて波を終えるまで。</summary>
+    private bool RadarVisible =>
+        BasePlayer != null && (_radarPreviewRequested || C.ShowRadar && (_state != State.None || _holders.Count > 0));
 
     #endregion
 
@@ -408,10 +495,15 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     public override void OnSetup() => _dr.Init();
 
+    public override void OnEnable() => _radarWindow = new(this);
+
     public override void OnDisable()
     {
         Finish("disable");
         FlushSnapshot("disable");
+        _radarWindow?.Dispose();
+        _radarWindow = null;
+        _radarPreviewRequested = false;
     }
 
     public override void OnReset()
@@ -426,6 +518,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
     public override void OnUpdate()
     {
+        ScanHolders();
         if (_state == State.None)
         {
             if (BasePlayer != null && PhaseActive) TryLatchWave();
@@ -435,6 +528,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             Advance();
         }
         SampleSnapshot();   // Advance の後。今フレームの計画/送信を取るため
+        UpdateRadar();
     }
 
     public override void OnVFXSpawn(uint target, string vfxPath)
@@ -479,6 +573,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (!ImGuiEx.CollapsingHeader("Debug")) return;
         ImGuiEx.EzTabBar("##P4LFDebug",
             ("現在", DrawNowTab, null, false),
+            ("レーダー", DrawRadarTab, null, false),
             ("記録", DrawRecordTab, null, false),
             ("テスト", DrawTestTab, null, false),
             ("履歴", DrawHistoryTab, null, false));
@@ -491,14 +586,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* private methods                                                  */
     /********************************************************************/
 
-    /// <summary>次の視線の波が近づいていたら、その波の保持者をつかむ。</summary>
-    /// <remarks>一番早く切れる人の残りが LeadSeconds を切った瞬間に、その人から 2 秒以内に
-    /// 切れる人を全員まとめて 1 つの波にする。短い組と長い組は約 9 秒離れているので混ざらない。
-    /// 本物/嘘はつかんだ時点で確定させる。視線が撃たれるころにはデバフが消えていて引けないため。
-    ///
-    /// 直前に処理した波と同じ時刻に切れるものは拾わない。固定を解いた直後、消えかけのデバフが
-    /// 残り 0 秒付近で数フレーム見えることがあるため。</remarks>
-    private void TryLatchWave()
+    /// <summary>呪詛の叫声を持っている人を _holders に集め直す。毎フレーム。</summary>
+    private void ScanHolders()
     {
         _holders.Clear();
         foreach (var pc in Controller.GetPartyMembers())
@@ -508,6 +597,17 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
                 _holders.Add((pc.EntityId, pc.Name.ToString(), s.StatusId, s.RemainingTime));
                 break;
             }
+    }
+
+    /// <summary>次の視線の波が近づいていたら、その波の保持者をつかむ。</summary>
+    /// <remarks>一番早く切れる人の残りが LeadSeconds を切った瞬間に、その人から 2 秒以内に
+    /// 切れる人を全員まとめて 1 つの波にする。短い組と長い組は約 9 秒離れているので混ざらない。
+    /// 本物/嘘はつかんだ時点で確定させる。視線が撃たれるころにはデバフが消えていて引けないため。
+    ///
+    /// 直前に処理した波と同じ時刻に切れるものは拾わない。固定を解いた直後、消えかけのデバフが
+    /// 残り 0 秒付近で数フレーム見えることがあるため。</remarks>
+    private void TryLatchWave()
+    {
         if (_holders.Count == 0) return;
 
         var first = _holders.Min(h => h.Remaining);
@@ -518,7 +618,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (Math.Abs(endMs - _lastWaveEndMs) < 1500) return;
 
         _wave.Clear();
-        foreach (var h in _holders.Where(h => h.Remaining <= first + 2f))
+        foreach (var h in _holders.Where(h => h.Remaining <= first + GroupSeconds))
             _wave.Add(new WaveSource
             {
                 EntityId = h.EntityId,
@@ -564,7 +664,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (_state == State.Loading) AdvanceLoading();
 
         // 読み込み待ちでも計算はする。Debug で「何を向くつもりか」を先に見られるように
-        _plannedRotation = ComputeFacing();
+        _plannedRotation = ComputeFacing(_wave);
         if (!_fired && now >= _waveEndMs) RecordFire();
         if (_state != State.Locked || _dryRun || _plannedRotation is not { } rotation) return;
 
@@ -596,7 +696,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         Log(_note);
     }
 
-    /// <summary>今フレームに向くべき方向を、キャラの Rotation (ラジアン) で返す。</summary>
+    /// <summary>sources を発生源として、今フレームに向くべき方向をキャラの Rotation (ラジアン) で返す。</summary>
     /// <remarks>
     /// 発生源のうち嘘 (見る) が 1 人でも居れば、嘘の全員への方向の二等分線を向く。
     /// 全員が本物 (見ない) なら、本物の全員への二等分線の反対を向く。自分は発生源から除く。
@@ -612,7 +712,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// Rotation は atan2(ΔX, ΔZ)。Daily Routines の WorldDirHToChara と同じ式で、
     /// 0=南 / +π/2=東 / ±π=北。方位 (度) を一度も経由しない。
     /// </remarks>
-    private float? ComputeFacing()
+    private float? ComputeFacing(List<WaveSource> sources)
     {
         var me = BasePlayer!;
         var myPos = new Vector2(me.Position.X, me.Position.Z);
@@ -621,7 +721,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         var awayCount = 0;
         var nearestDistance = float.MaxValue;
 
-        foreach (var src in _wave)
+        foreach (var src in sources)
         {
             src.IsSelf = src.EntityId == me.EntityId;
             src.Present = false;
@@ -656,7 +756,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
         facing = Vector2.Normalize(facing);
         var actual = FacingOf(me.Rotation);
-        foreach (var src in _wave.Where(x => x.Present))
+        foreach (var src in sources.Where(x => x.Present))
         {
             src.PlannedAngle = AngleBetween(facing, src.Unit);
             src.ActualAngle = AngleBetween(actual, src.Unit);
@@ -695,6 +795,46 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _lastFireHeader = $"{DateTime.Now:HH:mm:ss.fff}  dry={_dryRun}  詠唱中={(BasePlayer?.IsCasting == true ? "Y" : "N")}  " +
                           $"計画 {Deg(_plannedRotation)} / 送信 {Deg(_sentRotation)} / 実際 {Deg(BasePlayer?.Rotation)}";
         Log($"発動: {_lastFireHeader} / " + string.Join(" / ", _lastFire.Select(x => x.Text)));
+    }
+
+    /// <summary>レーダーに出すものを作り直す。波をつかんでいればその波、まだなら次の波を仮に組む。</summary>
+    /// <remarks>仮組みは TryLatchWave と同じ規則 (先頭から GroupSeconds 以内) で、真偽も今の記録から引く。
+    /// 本物/嘘はデバフが付いた時点で確定しているので、波をつかむ前から計画の扇まで出せる。</remarks>
+    private void UpdateRadar()
+    {
+        _radarLater.Clear();
+        if (_state != State.None)
+        {
+            _radarPlanned = _plannedRotation;
+            _radarCountdown = (_waveEndMs - Environment.TickCount64) / 1000f;
+            foreach (var h in _holders.Where(h => _wave.All(w => w.EntityId != h.EntityId)))
+                _radarLater.Add((h.EntityId, h.Remaining));
+            return;
+        }
+        BuildPreview();
+        _radarPlanned = _preview.Count > 0 && BasePlayer != null ? ComputeFacing(_preview) : null;
+    }
+
+    /// <summary>次に切れる組を _preview に仮に組み、残りを _radarLater に入れる。</summary>
+    private void BuildPreview()
+    {
+        _preview.Clear();
+        _radarCountdown = null;
+        if (_holders.Count == 0) return;
+
+        var first = _holders.Min(h => h.Remaining);
+        _radarCountdown = first;
+        foreach (var h in _holders)
+        {
+            if (h.Remaining > first + GroupSeconds) { _radarLater.Add((h.EntityId, h.Remaining)); continue; }
+            _preview.Add(new WaveSource
+            {
+                EntityId = h.EntityId,
+                Name = h.Name,
+                Fake = _fakeStatuses.Contains((h.EntityId, h.StatusId)),
+                RemainingAtLatch = h.Remaining,
+            });
+        }
     }
 
     /// <summary>固定を解き、読み込んだモジュールを戻して、波を捨てる。</summary>
@@ -822,7 +962,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             entries.Add(new("実際", () => ShowJudge(src, src.ActualAngle)));
         }
         if (entries.Count > 0) ImGuiEx.EzTable(entries);
-        DrawRadar();
+        if (BasePlayer == null) ImGuiEx.Text("レーダー: 自分が居ない");
+        else DrawRadarCanvas(240f, 1f);
+        ImGuiEx.Text($"緑=嘘 (見る) / 赤=本物 (見ない) / 灰=後の組 / 水色=計画の扇 ±{ConeHalfAngle:F0}° / 黄=実際の向き");
         DrawLastFire();
         DrawSnapshot();
     }
@@ -835,54 +977,92 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Text(ok ? EColor.GreenBright : EColor.RedBright, $"{angle:F1}° {(ok ? "OK" : "NG")}");
     }
 
-    /// <summary>真上から見た図。北が上、自分が中心。</summary>
+    /// <summary>真上から見た図。北が上、自分が中心。Debug の「現在」とレーダーのウィンドウで共用する。</summary>
     /// <remarks>ゲームの X=東 / Z=南 を画面の右 / 下にそのまま置く。だから Z を反転しない。
-    /// 縮尺は一番遠い発生源が外周の 9 割に来るように合わせる (最低 10m)。</remarks>
-    private void DrawRadar()
+    /// 縮尺は一番遠い保持者が外周の 9 割に来るように合わせる (最低 10m)。
+    /// 中身は UpdateRadar が毎フレーム作る。色の不透明度は全部 opacity 倍する。</remarks>
+    private void DrawRadarCanvas(float size, float opacity)
     {
-        const float size = 240f;
-        if (BasePlayer is not { } me || _wave.Count == 0) { ImGuiEx.Text("レーダー: 波が無い"); return; }
-
+        if (BasePlayer is not { } me) return;
         var myPos = new Vector2(me.Position.X, me.Position.Z);
-        var range = 10f;
-        foreach (var src in _wave)
-            if (src.EntityId.GetObject() is { } o)
-                range = MathF.Max(range, Vector2.Distance(new Vector2(o.Position.X, o.Position.Z), myPos) / 0.9f);
-
+        var range = RadarRange(myPos);
         var origin = ImGui.GetCursorScreenPos();
         var center = origin + new Vector2(size / 2f);
         var radius = size / 2f - 14f;
         var dl = ImGui.GetWindowDrawList();
-        dl.AddRectFilled(origin, origin + new Vector2(size), (EColor.Black with { W = 0.6f }).ToUint());
-        dl.AddCircle(center, radius, (EColor.White with { W = 0.3f }).ToUint());
-        dl.AddText(center + new Vector2(-4f, -radius - 13f), EColor.White.ToUint(), "N");
-        if (_plannedRotation is { } planned) DrawCone(dl, center, radius, planned);
-        dl.AddLine(center, center + FacingOf(me.Rotation) * radius, EColor.YellowBright.ToUint(), 2f);
 
-        foreach (var src in _wave)
-        {
-            if (src.IsSelf || src.EntityId.GetObject() is not { } o) continue;
-            var p = center + (new Vector2(o.Position.X, o.Position.Z) - myPos) * (radius / range);
-            dl.AddCircleFilled(p, 5f, (src.Fake ? EColor.GreenBright : EColor.RedBright).ToUint());
-            dl.AddText(p + new Vector2(7f, -7f), EColor.White.ToUint(), src.Name.Length > 8 ? src.Name[..8] : src.Name);
-        }
-        dl.AddCircleFilled(center, 4f, EColor.White.ToUint());
+        dl.AddRectFilled(origin, origin + new Vector2(size), Col(EColor.Black, 0.6f * opacity), 6f);
+        dl.AddCircle(center, radius, Col(EColor.White, 0.3f * opacity));
+        dl.AddText(center + new Vector2(-4f, -radius - 13f), Col(EColor.White, opacity), "N");
+        dl.AddText(origin + new Vector2(6f, size - 18f), Col(EColor.White, 0.5f * opacity), $"{range:F0}m");
+        if (_radarPlanned is { } planned) DrawCone(dl, center, radius, planned, opacity);
+        dl.AddLine(center, center + FacingOf(me.Rotation) * radius, Col(EColor.YellowBright, opacity), 2f);
+
+        DrawRadarDots(dl, center, radius / range, myPos, me.EntityId, opacity);
+        DrawRadarCaption(dl, origin + new Vector2(6f, 4f), me.EntityId, opacity);
         ImGui.Dummy(new Vector2(size));
-        ImGuiEx.Text($"外周 {range:F0}m  緑=嘘 (見る) / 赤=本物 (見ない) / 水色=計画の扇 ±{ConeHalfAngle:F0}° / 黄=実際の向き");
+    }
+
+    /// <summary>外周が何 m か。一番遠い保持者が外周の 9 割に来るように、最低 10m。</summary>
+    private float RadarRange(Vector2 myPos)
+    {
+        var range = 10f;
+        foreach (var id in RadarSources.Select(x => x.EntityId).Concat(_radarLater.Select(x => x.EntityId)))
+            if (id.GetObject() is { } o)
+                range = MathF.Max(range, Vector2.Distance(new Vector2(o.Position.X, o.Position.Z), myPos) / 0.9f);
+        return range;
+    }
+
+    /// <summary>保持者の点。次の波は緑 (嘘) / 赤 (本物)、後の組は灰色に残り秒数。自分が保持者なら中心に輪。</summary>
+    private void DrawRadarDots(ImDrawListPtr dl, Vector2 center, float scale, Vector2 myPos, uint myId, float opacity)
+    {
+        Vector2 ToScreen(Vector3 p) => center + (new Vector2(p.X, p.Z) - myPos) * scale;
+
+        foreach (var (id, remaining) in _radarLater)
+        {
+            if (id.GetObject() is not { } o) continue;
+            var p = ToScreen(o.Position);
+            dl.AddCircleFilled(p, 4f, Col(EColor.White, 0.35f * opacity));
+            dl.AddText(p + new Vector2(6f, -7f), Col(EColor.White, 0.5f * opacity), $"{remaining:F0}s");
+        }
+        foreach (var src in RadarSources)
+        {
+            var color = Col(src.Fake ? EColor.GreenBright : EColor.RedBright, opacity);
+            if (src.EntityId == myId) { dl.AddCircle(center, 9f, color, 0, 2f); continue; }
+            if (src.EntityId.GetObject() is not { } o) continue;
+            var p = ToScreen(o.Position);
+            dl.AddCircleFilled(p, 5f, color);
+            dl.AddText(p + new Vector2(7f, -7f), Col(EColor.White, opacity), src.Name.Length > 8 ? src.Name[..8] : src.Name);
+        }
+        dl.AddCircleFilled(center, 4f, Col(EColor.White, opacity));
+    }
+
+    /// <summary>左上の文字。次の発動まで何秒か、見るのか見ないのか、固定中か。</summary>
+    /// <remarks>見る/見ないは自分以外の発生源で決める (自分の視線は自分に当たらない)。</remarks>
+    private void DrawRadarCaption(ImDrawListPtr dl, Vector2 pos, uint myId, float opacity)
+    {
+        if (_radarCountdown is not { } countdown || !RadarSources.Any(x => x.EntityId != myId)) return;
+        var look = RadarSources.Any(x => x.Fake && x.EntityId != myId);
+        var mode = _state == State.None ? "" : _dryRun ? "  計算のみ" : "  固定中";
+        dl.AddText(pos, Col(look ? EColor.GreenBright : EColor.RedBright, opacity),
+            $"{MathF.Max(countdown, 0f):F1}s  {(look ? "見る" : "見ない")}{mode}");
     }
 
     /// <summary>計画の向きの扇 (±ConeHalfAngle) を塗る。</summary>
     /// <remarks>ImGui の弧の角度は画面の +x から +y (下) へ回る。FacingOf を画面にそのまま置いているので、
     /// 中心角は atan2(画面 y, 画面 x)。</remarks>
-    private static void DrawCone(ImDrawListPtr dl, Vector2 center, float radius, float rotation)
+    private static void DrawCone(ImDrawListPtr dl, Vector2 center, float radius, float rotation, float opacity)
     {
         var f = FacingOf(rotation);
         var mid = MathF.Atan2(f.Y, f.X);
         var half = ConeHalfAngle * MathF.PI / 180f;
         dl.PathLineTo(center);
         dl.PathArcTo(center, radius, mid - half, mid + half, 24);
-        dl.PathFillConvex((EColor.CyanBright with { W = 0.25f }).ToUint());
+        dl.PathFillConvex(Col(EColor.CyanBright, 0.25f * opacity));
     }
+
+    /// <summary>色に不透明度を掛けて ImGui の色にする。</summary>
+    private static uint Col(Vector4 color, float alpha) => (color with { W = color.W * alpha }).ToUint();
 
     /// <summary>直前の発動の瞬間の判定。波が終わっても次の発動まで残す。</summary>
     private void DrawLastFire()
@@ -910,6 +1090,35 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             ImGuiEx.Text(_lastSnapshot);
         }
         ImGui.TreePop();
+    }
+
+    // ---- Debug: レーダー -------------------------------------------------------
+
+    /// <summary>別ウィンドウのレーダーの設定と位置合わせ。</summary>
+    /// <remarks>位置を固定していない間はドラッグで動かせるが、その場所のクリックはゲームに届かない。
+    /// 置いたら固定する (NoInputs でクリックを素通りさせる)。</remarks>
+    private void DrawRadarTab()
+    {
+        ImGui.Checkbox("デバフが付いている間レーダーを出す", ref C.ShowRadar);
+        ImGui.Checkbox("位置を固定 (クリックを素通りさせる)", ref C.RadarLocked);
+        ImGuiEx.Tooltip("外すとドラッグで動かせる。外している間、レーダーの上のクリックはゲームに届かない");
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("不透明度", ref C.RadarOpacity, 0.1f, 1f, "%.2f");
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("大きさ (px)", ref C.RadarSize, 120f, 480f, "%.0f");
+        ImGuiEx.Text($"位置: {C.RadarPosition.X:F0}, {C.RadarPosition.Y:F0}");
+
+        if (!IsEnabled) ImGuiEx.Text(EColor.RedBright, "スクリプトが有効でない (Dancing Mad の外)。ウィンドウが無いので出せない");
+        ImGui.BeginDisabled(!IsEnabled);
+        if (ImGui.Button(_radarPreviewRequested ? "位置合わせを終える" : "位置合わせ (デバフが無くても出す)"))
+            _radarPreviewRequested = !_radarPreviewRequested;
+        ImGui.SameLine();
+        if (ImGui.Button("位置を初期値に戻す"))
+        {
+            C.RadarPosition = DefaultRadarPosition;
+            _radarForcePosition = true;
+        }
+        ImGui.EndDisabled();
     }
 
     // ---- Debug: 記録 ---------------------------------------------------------
