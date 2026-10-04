@@ -38,6 +38,12 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// いるあいだ常にキャラをカメラ方向へ向け続けるので、普段は切っておき、波のときだけ読み込んで
 /// 終わったら戻す。モジュールは詠唱中に向きを送らないので、発動の瞬間に詠唱していると効かない。
 ///
+/// 設定画面の Debug 欄は 4 タブ:
+///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)
+///   記録   分身の正直/嘘つき、嘘の回に付いたデバフ、今の保持者と「今つかんだらこう判定する」
+///   テスト 好きな人を発生源にした波を本物と同じ道で流す / Daily Routines を手で叩いて向きを確かめる
+///   履歴   判断ログ。VerboseLog が切れていても残す
+///
 /// 下の Api は Generic/DailyRoutinesIPC.cs の Api をそのまま貼ったもの。直すときは向こうを
 /// 直してから貼り直す (Splatoon はスクリプトを 1 ファイルずつ別にコンパイルするため共有できない)。
 /// </remarks>
@@ -69,6 +75,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float PlannedAngle;       // 計画した向きから見たこの人の角度 (度、0〜180)
         public float ActualAngle;        // 実際の向きから見たこの人の角度
     }
+
+    /// <summary>発動の瞬間に取った判定 1 行。Ok = null は判定しようがない (自分 / 見えない)。</summary>
+    private readonly record struct FireLine(string Text, bool? Ok);
 
     #endregion
 
@@ -171,8 +180,10 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public bool? AutoDiscardIsBusy => Gate("AutoDiscard") ? _discardIsBusy() : null;
         public float? SpeedMultiplier => Gate("AutoSpeedMultiplier") ? _speedGet() : null;
 
-        /// <summary>購読を張る。OnSetup か OnEnable から 1 回呼ぶ。</summary>
-        /// <remarks>2 回呼んでも購読が重複するだけで害は無いが、無駄なので閂を掛けてある。
+        /// <summary>購読を張る。OnSetup から 1 回呼ぶ。</summary>
+        /// <remarks>OnEnable では遅い。ValidTerritories の外ではスクリプトが有効にならず、そこで設定画面を開くと
+        /// 未初期化のフィールド (null) を呼んで落ちる。
+        /// 2 回呼んでも購読が重複するだけで害は無いが、無駄なので閂を掛けてある。
         /// Daily Routines が入っていなくても失敗しない。購読は張れて、呼んだときに既定値が返る。</remarks>
         public void Init()
         {
@@ -313,6 +324,13 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     // 呪詛の叫声。452 は旧 ID (P4_Debuff_Reminder の Debuff.LookAway と同じ並び)
     private static readonly uint[] LookAwayIds = [5543, 452];
 
+    private const string FaceModule = "AutoFaceCameraDirection";
+    private const float ConeHalfAngle = 45f;   // 視線の扇の半角 (度)。Satisfies の説明を参照
+    private const int HistoryMax = 300;        // 履歴タブに残す行数
+
+    // テストタブの「〜を向く」。コンパス方位 (度、0=北の時計回り)
+    private static readonly (string Label, float Bearing)[] Bearings = [("北", 0f), ("東", 90f), ("南", 180f), ("西", 270f)];
+
     #endregion
 
     #region public properties
@@ -320,7 +338,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(1, "Redmoon");
+    public override Metadata Metadata => new(2, "Redmoon");
 
     #endregion
 
@@ -345,9 +363,18 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private float? _sentRotation;        // 最後に送った向き。同じ値を毎フレーム送らないため
     private float? _plannedRotation;     // 今フレームに計算した向き (Debug 用)
     private string _note = "";           // 直近の判断 (Debug 用)
+    private bool _fired;                 // 発動の瞬間の判定を取ったか
 
     // ---- 波をまたいで残す。OnReset で戻す ------------------------------------
     private long _lastWaveEndMs;         // 直前に処理した波。切れかけのデバフでつかみ直さないため
+
+    // ---- Debug 画面。リセットしない (前のトライを後から見るため) -------------
+    private readonly List<string> _history = [];         // Log の中身。VerboseLog に関係なく残す
+    private readonly List<FireLine> _lastFire = [];      // 直前の発動の瞬間の判定
+    private string _lastFireHeader = "";
+    private readonly Dictionary<uint, int> _testRole = [];   // テスト波の発生源。0=対象外 / 1=本物 / 2=嘘
+    private float _testFireSeconds = 3f;
+    private bool _testDryRun = true;
 
     // 毎フレームの走査で使い回す。フェーズ中ずっと走るので確保しない
     private readonly List<(uint EntityId, string Name, uint StatusId, float Remaining)> _holders = [];
@@ -364,7 +391,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     // 本物/嘘の記録は P4_Debuff_Reminder の OnVFXSpawn / OnActionEffectEvent / OnGainBuffEffect を
     // 呪詛の叫声だけに絞って写したもの。向きの判断は OnUpdate から private に出してある。
 
-    public override void OnEnable() => _dr.Init();
+    public override void OnSetup() => _dr.Init();
 
     public override void OnDisable() => Finish("disable");
 
@@ -426,7 +453,11 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     {
         DrawSettings();
         if (!ImGuiEx.CollapsingHeader("Debug")) return;
-        DrawDebug();
+        ImGuiEx.EzTabBar("##P4LFDebug",
+            ("現在", DrawNowTab, null, false),
+            ("記録", DrawRecordTab, null, false),
+            ("テスト", DrawTestTab, null, false),
+            ("履歴", DrawHistoryTab, null, false));
     }
 
     #endregion
@@ -470,16 +501,23 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
                 Fake = _fakeStatuses.Contains((h.EntityId, h.StatusId)),
                 RemainingAtLatch = h.Remaining,
             });
+        BeginWave(endMs, false, "波をつかんだ");
+    }
 
+    /// <summary>_wave に詰めた発生源で波を始める。本物の波とテスト波の共通部分。</summary>
+    /// <param name="forceDry">true なら Daily Routines が居ても送らない (テスト用)。</param>
+    private void BeginWave(long endMs, bool forceDry, string origin)
+    {
         _waveEndMs = endMs;
         _lastWaveEndMs = endMs;
         _loadRequested = false;
         _loadedByUs = false;
         _sentRotation = null;
-        _dryRun = Svc.Condition[ConditionFlag.DutyRecorderPlayback] || !_dr.Available;
-        _state = _dryRun || _dr.IsModuleEnabled("AutoFaceCameraDirection") == true ? State.Locked : State.Loading;
-        _note = _dryRun ? "dry run (リプレイ中か Daily Routines が無い)" : "";
-        Log($"波をつかんだ: 残り {first:F2}s / " +
+        _fired = false;
+        _dryRun = forceDry || Svc.Condition[ConditionFlag.DutyRecorderPlayback] || !_dr.Available;
+        _state = _dryRun || _dr.IsModuleEnabled(FaceModule) == true ? State.Locked : State.Loading;
+        _note = !_dryRun ? "" : forceDry ? "dry run (テスト)" : "dry run (リプレイ中か Daily Routines が無い)";
+        Log($"{origin}: 発動まで {(endMs - Environment.TickCount64) / 1000f:F2}s / " +
             string.Join(", ", _wave.Select(w => $"{w.Name}={(w.Fake ? "嘘" : "本物")}")) +
             $" / state={_state} dry={_dryRun}");
     }
@@ -488,13 +526,19 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private void Advance()
     {
         var now = Environment.TickCount64;
-        if (now > _waveEndMs + (long)(C.HoldSeconds * 1000f)) { Finish("発動から HoldSeconds 経過"); return; }
+        if (now > _waveEndMs + (long)(C.HoldSeconds * 1000f))
+        {
+            if (!_fired) RecordFire();   // HoldSeconds=0 だと発動のフレームを飛び越えることがある
+            Finish("発動から HoldSeconds 経過");
+            return;
+        }
         if (BasePlayer == null || BasePlayer.IsDead) { Finish("自分が居ない/死んでいる"); return; }
 
         if (_state == State.Loading) AdvanceLoading();
 
         // 読み込み待ちでも計算はする。Debug で「何を向くつもりか」を先に見られるように
         _plannedRotation = ComputeFacing();
+        if (!_fired && now >= _waveEndMs) RecordFire();
         if (_state != State.Locked || _dryRun || _plannedRotation is not { } rotation) return;
 
         // 0.01 rad (約 0.6°) 未満の変化は送らない。IPC とモジュールの書き戻しを毎フレーム起こさないため
@@ -507,7 +551,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// 立ち上がるまで毎フレーム IsModuleEnabled を見る。読み込めなかったら dry run に落とす。</remarks>
     private void AdvanceLoading()
     {
-        if (_dr.IsModuleEnabled("AutoFaceCameraDirection") == true)
+        if (_dr.IsModuleEnabled(FaceModule) == true)
         {
             _state = State.Locked;
             Log("モジュールが立ち上がった。固定を始める");
@@ -516,7 +560,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (_loadRequested) return;
 
         _loadRequested = true;
-        _loadedByUs = _dr.LoadModule("AutoFaceCameraDirection");
+        _loadedByUs = _dr.LoadModule(FaceModule);
         if (_loadedByUs) return;
 
         _dryRun = true;
@@ -584,8 +628,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             return null;
 
         facing = Vector2.Normalize(facing);
-        // 実際の向き。Rotation から (X, Z) の単位ベクトルに戻す (0=南 → (0, +1))
-        var actual = new Vector2(MathF.Sin(me.Rotation), MathF.Cos(me.Rotation));
+        var actual = FacingOf(me.Rotation);
         foreach (var src in _wave.Where(x => x.Present))
         {
             src.PlannedAngle = AngleBetween(facing, src.Unit);
@@ -601,7 +644,31 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// <summary>見る/見ないの要求を満たしているか。</summary>
     /// <remarks>扇は ±45°。P4_Debuff_Reminder の EyeScope 要素 (coneAngleMin -45 / Max 45) に合わせてある。
     /// 嘘なら扇の中、本物なら扇の外に居れば OK。</remarks>
-    private static bool Satisfies(WaveSource src, float angle) => (angle <= 45f) == src.Fake;
+    private static bool Satisfies(WaveSource src, float angle) => (angle <= ConeHalfAngle) == src.Fake;
+
+    /// <summary>Rotation から (X, Z) の単位ベクトルに戻す。0=南 → (0, +1)。</summary>
+    /// <remarks>画面の右=東 / 下=南 に置けば、そのまま画面上の向きにもなる (Debug のレーダー)。</remarks>
+    private static Vector2 FacingOf(float rotation) => new(MathF.Sin(rotation), MathF.Cos(rotation));
+
+    /// <summary>発動の瞬間の判定を取る。見たか/見なかったかの答え合わせ用。</summary>
+    /// <remarks>ここでの「実際」は自分の Rotation から計算したもの。ゲーム側の扇の幅は未確認
+    /// (±45° は P4_Debuff_Reminder の表示に合わせた仮定) なので、NG が境界付近ならそちらを疑う。</remarks>
+    private void RecordFire()
+    {
+        _fired = true;
+        _lastFire.Clear();
+        foreach (var src in _wave)
+        {
+            var who = $"{src.Name} ({(src.Fake ? "嘘" : "本物")})";
+            if (src.IsSelf) { _lastFire.Add(new($"{who}: 自分", null)); continue; }
+            if (!src.Present) { _lastFire.Add(new($"{who}: 見えない", null)); continue; }
+            var ok = Satisfies(src, src.ActualAngle);
+            _lastFire.Add(new($"{who}: 実際 {src.ActualAngle:F1}° {(ok ? "OK" : "NG")} / 計画 {src.PlannedAngle:F1}°", ok));
+        }
+        _lastFireHeader = $"{DateTime.Now:HH:mm:ss.fff}  dry={_dryRun}  詠唱中={(BasePlayer?.IsCasting == true ? "Y" : "N")}  " +
+                          $"計画 {Deg(_plannedRotation)} / 送信 {Deg(_sentRotation)} / 実際 {Deg(BasePlayer?.Rotation)}";
+        Log($"発動: {_lastFireHeader} / " + string.Join(" / ", _lastFire.Select(x => x.Text)));
+    }
 
     /// <summary>固定を解き、読み込んだモジュールを戻して、波を捨てる。</summary>
     /// <remarks>どこから呼ばれても安全なようにしてある (OnReset / OnDisable / 死亡 / 時間切れ)。
@@ -611,7 +678,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (_state == State.None) return;
 
         if (!_dryRun) _dr.CancelFacingLock();
-        if (_loadedByUs && C.UnloadAfter) _dr.UnloadModule("AutoFaceCameraDirection");
+        if (_loadedByUs && C.UnloadAfter) _dr.UnloadModule(FaceModule);
         Log($"波を終えた ({reason})。unload={_loadedByUs && C.UnloadAfter}");
 
         _state = State.None;
@@ -641,17 +708,17 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Text(EColor.YellowBright, "発動の瞬間に詠唱していると向きが送られない (モジュールの仕様)");
     }
 
+    // ---- Debug: 現在 ---------------------------------------------------------
+
     /// <summary>今の波と、計画/実際の向きがそれぞれ要求を満たしているか。</summary>
     /// <remarks>計画が OK なのに実際が NG なら、固定が効いていない (モジュール未読込・詠唱中など)。</remarks>
-    private void DrawDebug()
+    private void DrawNowTab()
     {
-        ImGuiEx.Text($"State: {_state}  dry={_dryRun}  loadedByUs={_loadedByUs}  isLie={_isLie}");
-        ImGuiEx.Text($"発動まで: {(_state == State.None ? "-" : $"{(_waveEndMs - Environment.TickCount64) / 1000f:F2}s")}");
-        ImGuiEx.Text($"計画: {Deg(_plannedRotation)}  送信済み: {Deg(_sentRotation)}  " +
-                     $"実際: {(BasePlayer is { } me ? $"{me.Rotation * 180f / MathF.PI:F1}°" : "-")}");
+        ImGuiEx.Text($"State: {_state}  dry={_dryRun}  loadedByUs={_loadedByUs}  {FaceModule}: {ModuleText()}");
+        ImGuiEx.Text($"発動まで: {(_state == State.None ? "-" : $"{(_waveEndMs - Environment.TickCount64) / 1000f:F2}s")}" +
+                     $"  詠唱中: {(BasePlayer?.IsCasting == true ? "Y" : "N")}");
+        ImGuiEx.Text($"計画: {Deg(_plannedRotation)}  送信済み: {Deg(_sentRotation)}  実際: {Deg(BasePlayer?.Rotation)}");
         if (_note != "") ImGuiEx.Text(EColor.YellowBright, _note);
-        ImGuiEx.Text($"記録済みの嘘: {_fakeStatuses.Count} 件 / 分身: " +
-                     string.Join(", ", _isTruth.Select(x => $"0x{x.Key:X}={(x.Value ? "正直" : "嘘つき")}")));
 
         List<ImGuiEx.EzTableEntry> entries = [];
         foreach (var src in _wave)
@@ -662,7 +729,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             entries.Add(new("計画", () => ShowJudge(src, src.PlannedAngle)));
             entries.Add(new("実際", () => ShowJudge(src, src.ActualAngle)));
         }
-        ImGuiEx.EzTable(entries);
+        if (entries.Count > 0) ImGuiEx.EzTable(entries);
+        DrawRadar();
+        DrawLastFire();
     }
 
     private static void ShowJudge(WaveSource src, float angle)
@@ -673,13 +742,222 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Text(ok ? EColor.GreenBright : EColor.RedBright, $"{angle:F1}° {(ok ? "OK" : "NG")}");
     }
 
+    /// <summary>真上から見た図。北が上、自分が中心。</summary>
+    /// <remarks>ゲームの X=東 / Z=南 を画面の右 / 下にそのまま置く。だから Z を反転しない。
+    /// 縮尺は一番遠い発生源が外周の 9 割に来るように合わせる (最低 10m)。</remarks>
+    private void DrawRadar()
+    {
+        const float size = 240f;
+        if (BasePlayer is not { } me || _wave.Count == 0) { ImGuiEx.Text("レーダー: 波が無い"); return; }
+
+        var myPos = new Vector2(me.Position.X, me.Position.Z);
+        var range = 10f;
+        foreach (var src in _wave)
+            if (src.EntityId.GetObject() is { } o)
+                range = MathF.Max(range, Vector2.Distance(new Vector2(o.Position.X, o.Position.Z), myPos) / 0.9f);
+
+        var origin = ImGui.GetCursorScreenPos();
+        var center = origin + new Vector2(size / 2f);
+        var radius = size / 2f - 14f;
+        var dl = ImGui.GetWindowDrawList();
+        dl.AddRectFilled(origin, origin + new Vector2(size), (EColor.Black with { W = 0.6f }).ToUint());
+        dl.AddCircle(center, radius, (EColor.White with { W = 0.3f }).ToUint());
+        dl.AddText(center + new Vector2(-4f, -radius - 13f), EColor.White.ToUint(), "N");
+        if (_plannedRotation is { } planned) DrawCone(dl, center, radius, planned);
+        dl.AddLine(center, center + FacingOf(me.Rotation) * radius, EColor.YellowBright.ToUint(), 2f);
+
+        foreach (var src in _wave)
+        {
+            if (src.IsSelf || src.EntityId.GetObject() is not { } o) continue;
+            var p = center + (new Vector2(o.Position.X, o.Position.Z) - myPos) * (radius / range);
+            dl.AddCircleFilled(p, 5f, (src.Fake ? EColor.GreenBright : EColor.RedBright).ToUint());
+            dl.AddText(p + new Vector2(7f, -7f), EColor.White.ToUint(), src.Name.Length > 8 ? src.Name[..8] : src.Name);
+        }
+        dl.AddCircleFilled(center, 4f, EColor.White.ToUint());
+        ImGui.Dummy(new Vector2(size));
+        ImGuiEx.Text($"外周 {range:F0}m  緑=嘘 (見る) / 赤=本物 (見ない) / 水色=計画の扇 ±{ConeHalfAngle:F0}° / 黄=実際の向き");
+    }
+
+    /// <summary>計画の向きの扇 (±ConeHalfAngle) を塗る。</summary>
+    /// <remarks>ImGui の弧の角度は画面の +x から +y (下) へ回る。FacingOf を画面にそのまま置いているので、
+    /// 中心角は atan2(画面 y, 画面 x)。</remarks>
+    private static void DrawCone(ImDrawListPtr dl, Vector2 center, float radius, float rotation)
+    {
+        var f = FacingOf(rotation);
+        var mid = MathF.Atan2(f.Y, f.X);
+        var half = ConeHalfAngle * MathF.PI / 180f;
+        dl.PathLineTo(center);
+        dl.PathArcTo(center, radius, mid - half, mid + half, 24);
+        dl.PathFillConvex((EColor.CyanBright with { W = 0.25f }).ToUint());
+    }
+
+    /// <summary>直前の発動の瞬間の判定。波が終わっても次の発動まで残す。</summary>
+    private void DrawLastFire()
+    {
+        ImGui.Separator();
+        if (_lastFire.Count == 0) { ImGuiEx.Text("前回の発動: まだ無い"); return; }
+        ImGuiEx.Text($"前回の発動: {_lastFireHeader}");
+        foreach (var line in _lastFire)
+            ImGuiEx.Text(line.Ok switch { true => EColor.GreenBright, false => EColor.RedBright, null => EColor.White },
+                "  " + line.Text);
+    }
+
+    // ---- Debug: 記録 ---------------------------------------------------------
+
+    /// <summary>本物/嘘の記録と、今デバフを持っている人。</summary>
+    private void DrawRecordTab()
+    {
+        ImGuiEx.Text($"フェーズ中: {PhaseActive}  今の回: {(_isLie ? "嘘つき" : "正直")}  記録済みの嘘: {_fakeStatuses.Count} 件");
+        ImGuiEx.Text("分身:");
+        if (_isTruth.Count == 0) ImGuiEx.Text("  (まだ無い)");
+        foreach (var (id, truth) in _isTruth)
+            ImGuiEx.Text(truth ? EColor.GreenBright : EColor.OrangeBright,
+                $"  0x{id:X8} {(truth ? "正直" : "嘘つき")}  {(id.GetObject() is { } o ? $"BaseId={o.BaseId}" : "(消えた)")}");
+
+        ImGuiEx.Text("嘘の回に付いた呪詛の叫声:");
+        if (_fakeStatuses.Count == 0) ImGuiEx.Text("  (まだ無い)");
+        foreach (var (id, status) in _fakeStatuses)
+            ImGuiEx.Text($"  {NameOf(id)}  status={status}");
+        DrawHolders();
+    }
+
+    /// <summary>今デバフを持っている人。判定は「今つかんだらこう判定する」もの。</summary>
+    /// <remarks>先頭の残りが LeadSeconds を切った瞬間に、先頭から 2 秒以内の人が 1 つの波になる。</remarks>
+    private void DrawHolders()
+    {
+        ImGuiEx.Text($"今の保持者 (残り {C.LeadSeconds:F1}s で波になる):");
+        List<ImGuiEx.EzTableEntry> entries = [];
+        foreach (var pc in Controller.GetPartyMembers())
+        {
+            var s = pc.StatusList.FirstOrDefault(x => x != null && LookAwayIds.Contains(x.StatusId) && x.RemainingTime > 0f);
+            if (s == null) continue;
+            var name = pc.Name.ToString();
+            var remaining = s.RemainingTime;
+            var fake = _fakeStatuses.Contains((pc.EntityId, s.StatusId));
+            entries.Add(new("Name", true, () => ImGuiEx.Text(name)));
+            entries.Add(new("残り", () => ImGuiEx.Text($"{remaining:F1}s")));
+            entries.Add(new("判定", () => ImGuiEx.Text(fake ? EColor.GreenBright : EColor.RedBright, fake ? "嘘 = 見る" : "本物 = 見ない")));
+        }
+        if (entries.Count == 0) ImGuiEx.Text("  (居ない)");
+        else ImGuiEx.EzTable(entries);
+    }
+
+    // ---- Debug: テスト ------------------------------------------------------
+
+    /// <summary>好きな人を発生源にしたテスト波と、Daily Routines の手動操作。</summary>
+    /// <remarks>テスト波は本物の波と同じ道 (BeginWave → Advance) を通る。OnUpdate が回っている
+    /// (= このエリアでスクリプトが有効な) ときしか進まない。</remarks>
+    private void DrawTestTab()
+    {
+        if (!IsEnabled) ImGuiEx.Text(EColor.RedBright, "スクリプトが有効でない (Dancing Mad の外)。テスト波は進まない");
+        DrawTestSources();
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("発動まで (s)", ref _testFireSeconds, 0.5f, 10f, "%.1f");
+        ImGui.Checkbox("dry run (送らずに計算だけ)", ref _testDryRun);
+
+        var picked = _testRole.Any(x => x.Value != 0);
+        ImGui.BeginDisabled(_state != State.None || !picked || !IsEnabled || BasePlayer == null);
+        if (ImGui.Button("テスト波を始める")) StartTestWave();
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_state == State.None);
+        if (ImGui.Button("中止")) Finish("手動で中止");
+        ImGui.EndDisabled();
+
+        ImGui.Separator();
+        DrawManualControls();
+    }
+
+    /// <summary>発生源の候補 = パーティ + 今のターゲット。人ごとに 対象外 / 本物 / 嘘 を選ぶ。</summary>
+    private void DrawTestSources()
+    {
+        var candidates = Controller.GetPartyMembers().Select(x => (x.EntityId, Name: x.Name.ToString())).ToList();
+        if (Svc.Targets.Target is { } t && candidates.All(x => x.EntityId != t.EntityId))
+            candidates.Add((t.EntityId, t.Name.ToString()));
+
+        foreach (var (id, name) in candidates)
+        {
+            var role = _testRole.GetValueOrDefault(id);
+            ImGui.RadioButton($"-##{id}", ref role, 0);
+            ImGui.SameLine();
+            ImGui.RadioButton($"本物##{id}", ref role, 1);
+            ImGui.SameLine();
+            ImGui.RadioButton($"嘘##{id}", ref role, 2);
+            ImGui.SameLine();
+            ImGuiEx.Text(id == BasePlayer?.EntityId ? $"{name} (自分)" : name);
+            _testRole[id] = role;
+        }
+    }
+
+    /// <summary>選んだ発生源で、_testFireSeconds 後に発動する波を始める。</summary>
+    private void StartTestWave()
+    {
+        _wave.Clear();
+        foreach (var (id, role) in _testRole)
+        {
+            if (role == 0 || id.GetObject() is not { } obj) continue;
+            _wave.Add(new WaveSource { EntityId = id, Name = obj.Name.ToString(), Fake = role == 2, RemainingAtLatch = _testFireSeconds });
+        }
+        if (_wave.Count == 0) return;
+        BeginWave(Environment.TickCount64 + (long)(_testFireSeconds * 1000f), _testDryRun, "テスト波");
+    }
+
+    /// <summary>Daily Routines を直接叩くボタン。角度の規約を実機で確かめるため。</summary>
+    /// <remarks>固定は「固定を解除」を押すまで残る。波の最中は波の処理と取り合うので押せなくしてある。</remarks>
+    private void DrawManualControls()
+    {
+        ImGuiEx.Text($"Daily Routines の手動操作 ({FaceModule}: {ModuleText()})");
+        ImGui.BeginDisabled(_state != State.None);
+        if (ImGui.Button("読み込む")) Manual("LoadModule", _dr.LoadModule(FaceModule));
+        ImGui.SameLine();
+        if (ImGui.Button("戻す")) Manual("UnloadModule", _dr.UnloadModule(FaceModule));
+        ImGui.SameLine();
+        if (ImGui.Button("固定を解除")) Manual("CancelFacingLock", _dr.CancelFacingLock());
+
+        foreach (var (label, bearing) in Bearings)
+        {
+            if (ImGui.Button($"{label}を向く")) Manual($"LockFacingOnBearing({bearing})", _dr.LockFacingOnBearing(bearing));
+            ImGui.SameLine();
+        }
+        if (ImGui.Button("ターゲットを向く") && BasePlayer is { } me && Svc.Targets.Target is { } t)
+            Manual($"LockFacingToward({t.Name})", _dr.LockFacingToward(me.Position, t.Position));
+        ImGui.EndDisabled();
+    }
+
+    private void Manual(string what, bool sent)
+    {
+        _note = $"手動: {what} → {(sent ? "送った" : "送れなかった (モジュール無効 / リプレイ中 / Daily Routines 無し)")}";
+        Log(_note);
+    }
+
+    // ---- Debug: 履歴 ---------------------------------------------------------
+
+    /// <summary>Log の履歴。VerboseLog が切れていても残す。新しい順。</summary>
+    private void DrawHistoryTab()
+    {
+        if (ImGui.Button("コピー")) GenericHelpers.Copy(string.Join("\n", _history));
+        ImGui.SameLine();
+        if (ImGui.Button("消去")) _history.Clear();
+        ImGui.SameLine();
+        ImGuiEx.Text($"{_history.Count}/{HistoryMax} 行");
+        for (var i = _history.Count - 1; i >= 0; i--) ImGuiEx.TextWrapped(_history[i]);
+    }
+
+    // ---- 小物 -----------------------------------------------------------------
+
+    private string ModuleText() => _dr.IsModuleEnabled(FaceModule) switch { true => "ON", false => "OFF", null => "不明" };
+
+    private static string NameOf(uint entityId) => entityId.GetObject()?.Name.ToString() ?? $"0x{entityId:X8}";
+
     /// <summary>Rotation (ラジアン) を度で出す。null は "-"。</summary>
     private static string Deg(float? rotation) => rotation is { } r ? $"{r * 180f / MathF.PI:F1}°" : "-";
 
+    /// <summary>判断を履歴に残す。VerboseLog なら dalamud.log にも出す。</summary>
     private void Log(string message)
     {
-        if (!C.VerboseLog) return;
-        PluginLog.Information($"[P4LF {_state}] {message}");
+        _history.Add($"{DateTime.Now:HH:mm:ss.fff} [{_state}] {message}");
+        if (_history.Count > HistoryMax) _history.RemoveRange(0, _history.Count - HistoryMax);
+        if (C.VerboseLog) PluginLog.Information($"[P4LF {_state}] {message}");
     }
 
     #endregion

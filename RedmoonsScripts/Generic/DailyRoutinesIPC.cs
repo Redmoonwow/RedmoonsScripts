@@ -122,8 +122,10 @@ internal class DailyRoutinesIPC : SplatoonScript
         public bool? AutoDiscardIsBusy => Gate("AutoDiscard") ? _discardIsBusy() : null;
         public float? SpeedMultiplier => Gate("AutoSpeedMultiplier") ? _speedGet() : null;
 
-        /// <summary>購読を張る。OnSetup か OnEnable から 1 回呼ぶ。</summary>
-        /// <remarks>2 回呼んでも購読が重複するだけで害は無いが、無駄なので閂を掛けてある。
+        /// <summary>購読を張る。OnSetup から 1 回呼ぶ。</summary>
+        /// <remarks>OnEnable では遅い。ValidTerritories の外ではスクリプトが有効にならず、そこで設定画面を開くと
+        /// 未初期化のフィールド (null) を呼んで落ちる。
+        /// 2 回呼んでも購読が重複するだけで害は無いが、無駄なので閂を掛けてある。
         /// Daily Routines が入っていなくても失敗しない。購読は張れて、呼んだときに既定値が返る。</remarks>
         public void Init()
         {
@@ -262,7 +264,7 @@ internal class DailyRoutinesIPC : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = null;   // どこでも。OnUpdate は何もしない
-    public override Metadata Metadata => new(2, "Redmoon");
+    public override Metadata Metadata => new(3, "Redmoon");
 
     #endregion
 

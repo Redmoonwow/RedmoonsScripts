@@ -134,7 +134,7 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(1, "Redmoon");
+    public override Metadata Metadata => new(2, "Redmoon");
 
     #endregion
 
@@ -187,7 +187,7 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
     /* public methods                                                   */
     /********************************************************************/
 
-    public override void OnEnable() => _dr.Init();
+    public override void OnSetup() => _dr.Init();
     public override void OnDisable() => EndTry("スクリプト無効化");
     public override void OnCombatStart() => BeginTry();
 
