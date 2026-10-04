@@ -435,7 +435,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(7, "Redmoon");
+    public override Metadata Metadata => new(8, "Redmoon");
 
     #endregion
 
@@ -553,7 +553,16 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         }
         else
         {
-            Advance();
+            try
+            {
+                Advance();
+            }
+            catch (Exception e)
+            {
+                // 例外のまま毎フレーム落ち続けると、固定が残って解除コマンドも打たれない。ここで必ず畳む
+                PluginLog.Error($"[P4LF] Advance で例外: {e}");
+                Finish($"例外: {e.Message}");
+            }
         }
         SampleSnapshot();   // Advance の後。今フレームの計画/送信を取るため
         UpdateRadar();
@@ -738,8 +747,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             if (line == "" || line.StartsWith('#')) continue;
             if (!line.StartsWith('/')) { Log($"{when}: / で始まらないので打たない: {line}"); continue; }
             if (replay) { Log($"{when}: dry run なので打たない: {line}"); continue; }
-            Chat.ExecuteCommand(line);
-            Log($"{when}: {line}");
+            // 1 行が失敗しても残りは打つ (解除コマンドが途中で止まると後始末が残る)
+            if (Guard($"{when}: {line}", () => Chat.ExecuteCommand(line))) Log($"{when}: {line}");
         }
     }
 
@@ -907,25 +916,56 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         }
     }
 
-    /// <summary>固定を解き、読み込んだモジュールを戻して、波を捨てる。</summary>
-    /// <remarks>どこから呼ばれても安全なようにしてある (OnReset / OnDisable / 死亡 / 時間切れ)。
-    /// 固定したまま放置すると、Daily Routines が向きを握り続けてキャラが振り向けなくなる。</remarks>
+    /// <summary>固定を解き、読み込んだモジュールを戻し、解除コマンドを打って、波を捨てる。</summary>
+    /// <remarks>
+    /// 固定を始めた波は、どう終わってもここを通る。呼び元:
+    ///   Advance       発動から HoldSeconds 経過 / 自分が居ない・死んでいる (ワイプで倒れたときはまずここ)
+    ///   OnReset       ワイプ・戦闘終了・Commence (Splatoon が呼ぶ) / 49884 で Controller.Reset
+    ///   OnDisable     エリア移動・スクリプトの無効化や読み直し・プラグインの終了
+    ///   OnUpdate      Advance が例外を投げたとき
+    ///   テストタブ    「中止」
+    /// 固定したまま放置すると、Daily Routines が向きを握り続けてキャラが振り向けなくなる。
+    ///
+    /// 状態を先に戻してから後始末をする。後始末 (IPC・チャット) のどれかが例外を投げても、
+    /// 波が残って次のフレームで Finish を繰り返したり、残りの後始末が飛んだりしないように。
+    /// 解除コマンドは固定を始めた波 (開始コマンドを打った波) だけで打つ。始める前に終わった波
+    /// (モジュールの読み込み失敗・読み込み待ちのうちにワイプ) では、開始も解除も打たない。
+    /// </remarks>
     private void Finish(string reason)
     {
         if (_state == State.None) return;
 
-        if (!_dryRun) _dr.CancelFacingLock();
-        if (_loadedByUs && C.UnloadAfter) _dr.UnloadModule(FaceModule);
-        Log($"波を終えた ({reason})。unload={_loadedByUs && C.UnloadAfter}");
-        if (_lockStarted) RunCommands("固定解除", C.LockEndCommands);   // 始めていない波 (読み込み失敗など) では打たない
-        _lockStarted = false;
-
+        var cancel = !_dryRun;
+        var unload = _loadedByUs && C.UnloadAfter;
+        var lockStarted = _lockStarted;
         _state = State.None;
         _wave.Clear();
         _loadRequested = false;
         _loadedByUs = false;
+        _lockStarted = false;
         _sentRotation = null;
         _plannedRotation = null;
+
+        Log($"波を終えた ({reason})。cancel={cancel} unload={unload} 解除コマンド={lockStarted}");
+        if (cancel) Guard("CancelFacingLock", () => _dr.CancelFacingLock());
+        if (unload) Guard("UnloadModule", () => _dr.UnloadModule(FaceModule));
+        if (lockStarted) RunCommands($"固定解除 ({reason})", C.LockEndCommands);
+    }
+
+    /// <summary>後始末を 1 つ実行する。例外は履歴に残して握り潰し、残りの後始末を続けさせる。</summary>
+    /// <returns>例外が出なかったか。</returns>
+    private bool Guard(string what, Action action)
+    {
+        try
+        {
+            action();
+            return true;
+        }
+        catch (Exception e)
+        {
+            Log($"{what} で例外: {e.Message}");
+            return false;
+        }
     }
 
     /// <summary>発動前後のスナップショットを始める。同じ波なら発動時刻だけ合わせ直す。</summary>
