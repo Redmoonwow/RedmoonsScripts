@@ -51,6 +51,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 自分に付いた本物の加速度爆弾 (5546) にも合わせて AE を止める。真偽は呪詛の叫声と同じ仕組みで取る:
 ///   本物 = 爆発の瞬間に静止していないと爆発する → 爆発の前後だけ AE を止める
 ///   嘘   = 爆発の瞬間に動いていればよい。動くのはプレイヤーで、AE を止めていても移動はできるので何もしない
+/// 視線の固定で AE を止めるのは「外向き」のときだけ。ターゲットの方を向いても全員の見る/見ないを満たす
+/// (内向き) なら、AE が技を撃って振り向いても困らないので止めない (NoStopWhenInward)。
 /// 止める/戻すは UpdateAeStop の 1 か所で毎フレーム決める。視線の固定解除 (/aestop off) が
 /// 本物の爆弾の直前に来て、爆発の瞬間に AE が動いてしまう取り合いを防ぐため。
 ///
@@ -113,6 +115,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     {
         public float LeadSeconds = 2.0f;   // 視線の何秒前から向きを固定するか
         public float HoldSeconds = 1.0f;   // 視線の何秒後まで固定を続けるか
+        public bool NoStopWhenInward = true;   // 内向き (ターゲットの方を向いても視線を満たす) なら、視線の固定で AE を止めない
+        public float InwardMargin = 10f;       // 内向き判定の余裕 (度)。扇の境界からこれだけ離れていること
         public bool UnloadAfter = true;    // 自分で読み込んだモジュールを、終わったら戻すか
         public bool VerboseLog;            // 波をつかむ/固定する/外すたびにログを残す
         public string LockStartCommands = "/aestop on";   // 視線の固定を始めたときに打つコマンド。1 行 1 コマンド
@@ -458,7 +462,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(13, "Redmoon");
+    public override Metadata Metadata => new(14, "Redmoon");
 
     #endregion
 
@@ -485,6 +489,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private string _note = "";           // 直近の判断 (Debug 用)
     private bool _fired;                 // 発動の瞬間の判定を取ったか
     private bool _lockStarted;           // 向きの固定を始めたか。UpdateAeStop が AE を止める理由の 1 つ
+    private bool _gazeNeedsStop;         // この波で AE を止める必要があるか (外向きになった)。一度 true になったら波の終わりまで戻さない
+    private string _inwardNote = "";     // 内向き判定の結果 (Debug 用)
 
     // ---- AE の停止/再開と加速度爆弾。OnReset で戻す ------------------------------
     private bool _gazeStopping;          // 視線の固定の「始め」コマンドを打ち、まだ「解除」していない
@@ -718,6 +724,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _sentRotation = null;
         _fired = false;
         _lockStarted = false;
+        _gazeNeedsStop = false;
+        _inwardNote = "";
         _dryRun = forceDry || Svc.Condition[ConditionFlag.DutyRecorderPlayback] || !_dr.Available;
         _state = _dryRun || _dr.IsModuleEnabled(FaceModule) == true ? State.Locked : State.Loading;
         _note = !_dryRun ? "" : forceDry ? "dry run (テスト)" : "dry run (リプレイ中か Daily Routines が無い)";
@@ -744,6 +752,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
 
         // 読み込み待ちでも計算はする。Debug で「何を向くつもりか」を先に見られるように
         _plannedRotation = ComputeFacing(_wave);
+        if (_state == State.Locked && !_dryRun && !_gazeNeedsStop) JudgeInward();
         if (!_fired && now >= _waveEndMs) RecordFire();
         if (_state != State.Locked || _plannedRotation is not { } rotation) return;
         if (_dryRun)
@@ -817,7 +826,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     {
         var now = Environment.TickCount64;
         var bomb = BombWindow(now);
-        var gaze = _lockStarted && !_dryRun;
+        var gaze = _lockStarted && !_dryRun && _gazeNeedsStop;
 
         if (gaze && !_gazeStopping) { _gazeStopping = true; RunCommands("視線の固定: 始め", C.LockStartCommands, Replay); }
         if (bomb && !_bombStopping) { _bombStopping = true; RunCommands("加速度爆弾 (本物): 窓に入った", C.BombStartCommands, Replay); }
@@ -959,6 +968,63 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     }
 
     /// <summary>2 つの単位ベクトルの間の角度 (度、0〜180)。</summary>
+    /// <summary>内向きかを見て、外向きなら _gazeNeedsStop を立てる。立ったら波の終わりまで戻さない。</summary>
+    /// <remarks>
+    /// 内向き = AE が技を撃ってターゲットの方へ振り向いても、今の波の全員について見る/見ないを満たすこと。
+    /// そのときは AE を止めなくても失敗しないので止めない (DPS を落とさない)。発動まで位置は動くので毎フレーム見て、
+    /// 一度でも外向きになったら止める。止めたり戻したりを繰り返さないよう、止める方向にだけ動かす。
+    /// 設定で無効なら最初のフレームで止める (v13 までと同じ)。
+    /// </remarks>
+    private void JudgeInward()
+    {
+        if (!C.NoStopWhenInward) { _gazeNeedsStop = true; _inwardNote = "内向き判定は無効"; return; }
+        if (TargetFacingSatisfies(out var why))
+        {
+            if (_inwardNote == "") Log($"内向き: AE は止めない ({why})");
+            _inwardNote = $"内向き ({why})";
+            return;
+        }
+        _gazeNeedsStop = true;
+        _inwardNote = $"外向き ({why})";
+        Log($"外向き: AE を止める ({why})");
+    }
+
+    /// <summary>ターゲット (無ければケフカ、それも無ければフィールド中央) の方を向いたとき、波の全員が OK か。</summary>
+    /// <remarks>OK の基準は Satisfies より InwardMargin だけ厳しくする: 嘘 (見る) は扇の半角 − 余裕 以内、
+    /// 本物 (見ない) は扇の半角 + 余裕 以上。ターゲットへの振り向きは真っ直ぐとは限らないため。
+    /// 位置が取れた発生源が 1 人もいなければ判断できないので false (= 止める)。</remarks>
+    private bool TargetFacingSatisfies(out string why)
+    {
+        var me = BasePlayer!;
+        var target = AutoFaceTarget(me);
+        var delta = new Vector2(target.Position.X - me.Position.X, target.Position.Z - me.Position.Z);
+        if (delta.LengthSquared() < 0.01f) { why = "ターゲットと重なっている"; return false; }
+        var unit = Vector2.Normalize(delta);
+
+        var checkedAny = false;
+        foreach (var src in _wave.Where(x => x.Present && !x.IsSelf))
+        {
+            checkedAny = true;
+            var angle = AngleBetween(unit, src.Unit);
+            var ok = src.Fake ? angle <= ConeHalfAngle - C.InwardMargin : angle >= ConeHalfAngle + C.InwardMargin;
+            if (!ok)
+            {
+                why = $"{target.Name} を向くと {src.Name} が {angle:F0}° ({(src.Fake ? "見る" : "見ない")})";
+                return false;
+            }
+        }
+        why = checkedAny ? $"{target.Name} を向いても全員 OK" : "発生源の位置が取れない";
+        return checkedAny;
+    }
+
+    /// <summary>AE が技を撃つときに振り向く相手。自分のターゲット → ケフカ → フィールド中央 (100, 0, 100)。</summary>
+    private static (string Name, Vector3 Position) AutoFaceTarget(Dalamud.Game.ClientState.Objects.Types.IGameObject me)
+    {
+        if (me.TargetObject is { } t && t.EntityId != me.EntityId) return (t.Name.ToString(), t.Position);
+        if (Svc.Objects.FirstOrDefault(x => x.BaseId == 18475) is { } kefka) return (kefka.Name.ToString(), kefka.Position);
+        return ("中央", new Vector3(100f, 0f, 100f));
+    }
+
     private static float AngleBetween(Vector2 a, Vector2 b) =>
         MathF.Acos(Math.Clamp(Vector2.Dot(a, b), -1f, 1f)) * 180f / MathF.PI;
 
@@ -1058,6 +1124,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _loadRequested = false;
         _loadedByUs = false;
         _lockStarted = false;
+        _gazeNeedsStop = false;
         _sentRotation = null;
         _plannedRotation = null;
 
@@ -1163,6 +1230,15 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGui.SetNextItemWidth(150f);
         ImGui.SliderFloat("Hold after (s)", ref C.HoldSeconds, 0f, 3f, "%.1f");
         ImGuiEx.Tooltip("視線の何秒後まで固定を続けるか");
+        ImGui.Checkbox("内向きなら AE を止めない", ref C.NoStopWhenInward);
+        ImGuiEx.Tooltip("ターゲットの方を向いても全員の見る/見ないを満たすなら、視線の固定で AE を止めない。外向きになった時点で止める");
+        if (C.NoStopWhenInward)
+        {
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(100f);
+            ImGui.SliderFloat("余裕 (°)", ref C.InwardMargin, 0f, 30f, "%.0f");
+            ImGuiEx.Tooltip("扇の境界からこれだけ離れていないと内向きとみなさない");
+        }
         ImGui.Checkbox("Unload AutoFaceCameraDirection after", ref C.UnloadAfter);
         ImGuiEx.Tooltip("自分で読み込んだときだけ戻す。元から有効にしていたなら触らない");
         ImGui.Checkbox("Verbose log", ref C.VerboseLog);
@@ -1204,6 +1280,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Text($"発動まで: {(_state == State.None ? "-" : $"{(_waveEndMs - Environment.TickCount64) / 1000f:F2}s")}" +
                      $"  詠唱中: {(BasePlayer?.IsCasting == true ? "Y" : "N")}");
         ImGuiEx.Text($"計画: {Deg(_plannedRotation)}  送信済み: {Deg(_sentRotation)}  実際: {Deg(BasePlayer?.Rotation)}");
+        if (_inwardNote != "") ImGuiEx.Text($"内向き判定: {_inwardNote}");
         ImGuiEx.Text($"AE を止めている理由: 視線の固定 {(_gazeStopping ? "Y" : "N")} / 本物の爆弾 {(_bombStopping ? "Y" : "N")}  " +
                      $"加速度爆弾: {BombText()}");
         if (_note != "") ImGuiEx.Text(EColor.YellowBright, _note);
