@@ -252,6 +252,17 @@ public class MyOverlay : EzOverlayWindow
 いずれも `Dalamud.Interface.Windowing.Window` 派生なので `WindowSystem` に登録して使う。
 **登録は `OnEnable`、解除と `Dispose` は `OnDisable` で行う** (`OnSetup` は後始末が無い)。
 
+**`WindowSystem.AddWindow` は同じ `WindowName` があると `ArgumentException` を投げる**
+("A window with this name/ID already exists")。スクリプトの更新・読み直しで前のインスタンスの
+ウィンドウが残っていると (無効のまま作った場合は `OnDisable` が来ない)、新しいインスタンスの登録が落ちる。
+登録の直前に同名のものを外しておく:
+
+```csharp
+foreach (var old in EzConfigGui.WindowSystem.Windows.Where(w => w.WindowName == WindowName).ToArray())
+    EzConfigGui.WindowSystem.RemoveWindow(old);
+EzConfigGui.WindowSystem.AddWindow(this);
+```
+
 ### トースト通知
 
 ```csharp

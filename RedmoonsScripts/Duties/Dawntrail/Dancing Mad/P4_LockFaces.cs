@@ -159,6 +159,11 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             DisableWindowSounds = true;
             DisableFadeInFadeOut = true;
             BgAlpha = 0f;   // 背景はレーダー自身が描く (不透明度を効かせるため)
+
+            // 同じ名前のウィンドウが残っていると AddWindow が例外を投げる ("A window with this name/ID already exists")。
+            // スクリプトの更新・読み直しで、無効のまま作られた前のインスタンスのウィンドウは OnDisable が来ずに残るので、先に外す
+            foreach (var old in EzConfigGui.WindowSystem.Windows.Where(w => w.WindowName == WindowName).ToArray())
+                EzConfigGui.WindowSystem.RemoveWindow(old);
             EzConfigGui.WindowSystem.AddWindow(this);
         }
 
@@ -451,7 +456,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(11, "Redmoon");
+    public override Metadata Metadata => new(12, "Redmoon");
 
     #endregion
 
@@ -1379,7 +1384,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// <summary>レーダーのウィンドウが無ければ作る。</summary>
     /// <remarks>OnEnable と、デザインモードを入れたときに呼ぶ。後者は Dancing Mad の外 (スクリプトが無効) でも
     /// 位置合わせできるようにするため。外は OnDisable が担う。無効のまま作ったものは OnDisable が来ないので残るが、
-    /// DesignActive が切れれば何も出さない。</remarks>
+    /// DesignActive が切れれば何も出さず、次に作るとき RadarWindow のコンストラクタが同じ名前の古いものを外す。</remarks>
     private void EnsureRadarWindow() => _radarWindow ??= new RadarWindow(this);
 
     // ---- Debug: 記録 ---------------------------------------------------------
