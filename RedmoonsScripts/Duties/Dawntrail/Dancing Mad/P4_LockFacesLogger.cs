@@ -36,7 +36,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   [WAVE]  同時に切れる保持者の組をつかんだ
 ///   [SELF]  自分の向き・詠唱中か・DR のモジュール状態 (TraceIntervalMs ごと)
 ///   [FIRE]  視線の発動。8 人全員の向き、各発生源への角度、P4_LockFaces と同じ規則で出した期待の向き
-///   [HIT]   発動前後の着弾。プレイヤーの技とオートアタックは除く
+///   [HIT]   発動前後の着弾。プレイヤーの技とオートアタックは除く。視線の技はデスシュリーク (47894 / 47895)
 ///   [PEN]   発動前後に付いたステータス (石化などのペナルティ候補)
 ///   [SUM]   予測 (向きと扇から見た成否) と実際 (被弾したか) の突き合わせ
 ///
@@ -126,6 +126,7 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
     /********************************************************************/
     private static readonly uint[] LookAwayIds = [5543, 452];   // 呪詛の叫声 (P4_LockFaces と同じ)
     private static readonly uint[] CloneIds = [19510, 19507];   // 正直/嘘つきの分身
+    private static readonly uint[] DeathShriekIds = [47894, 47895];   // デスシュリーク = 視線の技 (1 回目 / 2 回目)
 
     #endregion
 
@@ -134,7 +135,7 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(2, "Redmoon");
+    public override Metadata Metadata => new(3, "Redmoon");
 
     #endregion
 
@@ -461,8 +462,13 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
     }
 
     /// <summary>発動前後の着弾を記録する。プレイヤーの技とオートアタックは除く。</summary>
-    /// <remarks>視線の技 ID は分かっていないので、ここでは絞らずに全部書いて SUM で名前ごと並べる。
-    /// パーティ全員に当たったものは全体攻撃とみなし、成否の判定には使わない。</remarks>
+    /// <remarks>
+    /// 視線の技はデスシュリーク (1 回目 47894 / 2 回目 47895)。ネオエクスデスの分身が保持者の位置から撃ち、
+    /// **成功した人にも中身の無い効果 (Miss / StartActionCombo=技 ID) が付く**。だから「対象に入った」では数えず、
+    /// ダメージ・ステータス付与・ノックバック系・HP 設定のどれかが付いた人だけを被弾 (= 失敗) とする (Substantive)。
+    /// 成否 (SUM の「被弾」) はデスシュリークだけで決める。それ以外の技は [HIT] に書くだけ。
+    /// デスシュリークは分身 2 体で全員を覆うので全体攻撃扱いにしない。
+    /// </remarks>
     private void RecordHit(ActionEffectSet set, Lumina.Excel.Sheets.Action action)
     {
         if (action.IsPlayerAction || action.ActionCategory.RowId == 1) return;
@@ -471,16 +477,17 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
         var hit = set.TargetEffects.Where(t => party.ContainsKey((uint)t.TargetID)).ToList();
         if (hit.Count == 0) return;
 
-        var raidwide = hit.Count >= party.Count;
+        var shriek = DeathShriekIds.Contains(action.RowId);
+        var raidwide = !shriek && hit.Count >= party.Count;
         var detail = string.Join(" / ", hit.Select(t => $"{party[(uint)t.TargetID].Name}[{Effects(t)}]"));
-        Write($"[HIT] {action.Name}({action.RowId}) from {Obj(set.Source)} ({FromFire()})" +
+        Write($"[HIT] {action.Name}({action.RowId}){(shriek ? " = 視線" : "")} from {Obj(set.Source)} ({FromFire()})" +
               $"{(raidwide ? " 全員に命中 = 全体攻撃とみなす" : "")}: {detail}");
-        if (raidwide) return;
+        if (raidwide || !shriek) return;   // 成否はデスシュリークだけで決める。ほかの技は記録だけ
 
         var wave = _wave!;
         var refMs = wave.FireMs != 0 ? wave.FireMs : wave.ExpectedFireMs;
         if (Environment.TickCount64 < refMs - 1000) return;   // 発動の 1 秒より前は別ギミック
-        foreach (var t in hit)
+        foreach (var t in hit.Where(Substantive))
         {
             var id = (uint)t.TargetID;
             if (!wave.Hits.TryGetValue(id, out var list)) wave.Hits[id] = list = [];
@@ -759,6 +766,18 @@ internal unsafe class P4_LockFacesLogger : SplatoonScript<P4_LockFacesLogger.Con
 
     private static string StatusName(uint id) =>
         $"{Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Status>().GetRowOrDefault(id)?.Name.ToString() ?? "?"}({id})";
+
+    /// <summary>実際に何かされたか。ダメージ・ステータス付与・ノックバック系・HP 設定のどれかがあれば true。</summary>
+    /// <remarks>Miss / StartActionCombo (旧名 Unknown0、値は技 ID) / Nothing だけなら、当たり判定に入っただけで何も起きていない。</remarks>
+    private static bool Substantive(TargetEffect target)
+    {
+        var any = false;
+        target.ForEach(e => any |= e.type is ActionEffectType.Damage or ActionEffectType.BlockedDamage
+            or ActionEffectType.ParriedDamage or ActionEffectType.ApplyStatusEffectTarget
+            or ActionEffectType.ApplyStatusEffectSource or ActionEffectType.Knockback
+            or ActionEffectType.Attract1 or ActionEffectType.Attract2 or ActionEffectType.SetHP);
+        return any;
+    }
 
     /// <summary>1 人ぶんの効果。Nothing は捨てる。ステータス付与は名前に引く。</summary>
     private static string Effects(TargetEffect target)
