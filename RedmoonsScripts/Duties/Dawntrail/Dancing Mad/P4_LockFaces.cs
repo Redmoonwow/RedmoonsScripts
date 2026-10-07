@@ -115,14 +115,16 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float HoldSeconds = 1.0f;   // 視線の何秒後まで固定を続けるか
         public bool UnloadAfter = true;    // 自分で読み込んだモジュールを、終わったら戻すか
         public bool VerboseLog;            // 波をつかむ/固定する/外すたびにログを残す
-        public string LockStartCommands = "/aestop on";   // AE を止めるコマンド (視線の固定中・本物の加速度爆弾)。1 行 1 コマンド
+        public string LockStartCommands = "/aestop on";   // 視線の固定を始めたときに打つコマンド。1 行 1 コマンド
         // /aestop は引数なしだとトグル。トリガーラインの「切换停手」と重なると状態が逆になるので on/off で明示する
-        public string LockEndCommands = "/aestop off";   // AE を戻すコマンド (止める理由が無くなったとき)
+        public string LockEndCommands = "/aestop off";   // 視線の固定を解いたときに打つコマンド (爆弾で止めている間は打たない)
 
         // ---- 加速度爆弾 (自分に付いたものだけ) ----
         public bool BombControl = true;        // 本物の加速度爆弾に合わせて AE を止める
         public float BombTrueBefore = 3.0f;    // 爆発の何秒前から止めるか
         public float BombTrueAfter = 0.3f;     // 爆発の何秒後まで止めるか
+        public string BombStartCommands = "/aestop on";   // 爆弾の窓に入ったときに打つコマンド
+        public string BombEndCommands = "/aestop off";    // 爆弾の窓を出たときに打つコマンド (視線の固定中は打たない)
 
         // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
         public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
@@ -456,7 +458,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(12, "Redmoon");
+    public override Metadata Metadata => new(13, "Redmoon");
 
     #endregion
 
@@ -485,8 +487,8 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private bool _lockStarted;           // 向きの固定を始めたか。UpdateAeStop が AE を止める理由の 1 つ
 
     // ---- AE の停止/再開と加速度爆弾。OnReset で戻す ------------------------------
-    private bool _aeStopped;             // 自分が止めるコマンドを打って、まだ戻すコマンドで戻していないか
-    private string _aeReason = "";       // 今 AE を止めている理由 (Debug 用)
+    private bool _gazeStopping;          // 視線の固定の「始め」コマンドを打ち、まだ「解除」していない
+    private bool _bombStopping;          // 爆弾の「窓に入った」コマンドを打ち、まだ「窓を出た」をしていない
     private long _bombExpiryMs;          // 自分の加速度爆弾が爆発する時刻 (TickCount64)。0 = 付いていない
     private bool _bombFake;              // 嘘 = 動けばよい爆弾。AE は触らない
     private bool _bombReasserted;        // 爆発直前の打ち直しをしたか
@@ -801,36 +803,44 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         return now >= _bombExpiryMs - (long)(C.BombTrueBefore * 1000f) && now <= _bombExpiryMs + (long)(C.BombTrueAfter * 1000f);
     }
 
-    /// <summary>AE を止めるかを決めて、変わったときだけコマンドを打つ。毎フレーム呼ぶ。</summary>
+    /// <summary>視線の固定と本物の加速度爆弾、それぞれの始め/終わりのコマンドを打つ。毎フレーム呼ぶ。</summary>
     /// <remarks>
-    /// 止める理由: 本物の加速度爆弾の窓の中 / 視線の固定中。どちらも無くなったら、自分が止めた分だけ戻す。
-    /// 固定解除 (+Hold) が本物の爆弾の窓に入っていても、窓が終わるまで戻さない。
+    /// 始めのコマンドは、それぞれの理由が始まったときに打つ (もう片方で止めていても打つ。/aestop on の重複は無害)。
+    /// 終わりのコマンドは、**もう片方がまだ続いていれば打たない**。片方の /aestop off がもう片方の停止を解いてしまうため。
+    /// 両方が終わったとき、最後に終わった方の終わりのコマンドで戻す。同じフレームで両方終わったら爆弾の方を打つ。
+    ///   例: 視線の固定 (-5〜+1) と本物の爆弾 (爆発 +2.5) → -5 視線の始め / -0.5 爆弾の始め / +1 視線の終わりは打たない / +2.8 爆弾の終わり
     ///
-    /// 打つのは状態が変わったときだけ。ただし本物の爆弾の窓では、他 (トリガーラインの「切换停手」など) に
-    /// 戻されていても爆発の瞬間は止まっているように、爆発の BombReassertMs 前にもう一度だけ止め直す。
+    /// 本物の爆弾の窓では、他 (トリガーラインの「切换停手」など) に戻されていても爆発の瞬間は止まっているように、
+    /// 爆発の BombReassertMs 前に爆弾の始めのコマンドをもう一度だけ打つ。
     /// </remarks>
     private void UpdateAeStop()
     {
         var now = Environment.TickCount64;
         var bomb = BombWindow(now);
         var gaze = _lockStarted && !_dryRun;
-        var want = bomb || gaze;
-        _aeReason = bomb ? "加速度爆弾 本物: 静止" : gaze ? "視線の固定" : "";
 
-        if (want && !_aeStopped)
+        if (gaze && !_gazeStopping) { _gazeStopping = true; RunCommands("視線の固定: 始め", C.LockStartCommands, Replay); }
+        if (bomb && !_bombStopping) { _bombStopping = true; RunCommands("加速度爆弾 (本物): 窓に入った", C.BombStartCommands, Replay); }
+
+        var bombEnded = false;   // 同じフレームで両方終わったら、戻すのは爆弾の方の 1 回だけ
+        if (!bomb && _bombStopping)
         {
-            _aeStopped = true;
-            RunCommands($"AE 停止 ({_aeReason})", C.LockStartCommands, Replay);
+            _bombStopping = false;
+            bombEnded = true;
+            if (gaze) Log("加速度爆弾 (本物): 窓を出たが、視線の固定中なので終わりのコマンドは打たない");
+            else RunCommands("加速度爆弾 (本物): 窓を出た", C.BombEndCommands, Replay);
         }
-        else if (!want && _aeStopped)
+        if (!gaze && _gazeStopping)
         {
-            _aeStopped = false;
-            RunCommands("AE 再開 (止める理由が無くなった)", C.LockEndCommands, Replay);
+            _gazeStopping = false;
+            if (bomb) Log("視線の固定: 解除したが、本物の加速度爆弾の窓の中なので終わりのコマンドは打たない");
+            else if (!bombEnded) RunCommands("視線の固定: 解除", C.LockEndCommands, Replay);
         }
+
         if (bomb && !_bombReasserted && now >= _bombExpiryMs - BombReassertMs)
         {
             _bombReasserted = true;
-            RunCommands("爆発直前の止め直し (加速度爆弾 本物)", C.LockStartCommands, Replay);
+            RunCommands("加速度爆弾 (本物): 爆発直前の打ち直し", C.BombStartCommands, Replay);
         }
     }
 
@@ -1157,9 +1167,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Tooltip("自分で読み込んだときだけ戻す。元から有効にしていたなら触らない");
         ImGui.Checkbox("Verbose log", ref C.VerboseLog);
 
-        ImGuiEx.Text("AE を止めるコマンド (視線の固定中・本物の加速度爆弾。1 行 1 コマンド、# で始まる行は無視)");
+        ImGuiEx.Text("視線の固定を始めたときに打つコマンド (1 行 1 コマンド、# で始まる行は無視)");
         ImGui.InputTextMultiline("##LockStartCommands", ref C.LockStartCommands, 2000, new Vector2(400f, 60f));
-        ImGuiEx.Text("AE を戻すコマンド (止める理由が無くなったとき)");
+        ImGuiEx.Text("視線の固定を解いたときに打つコマンド (本物の加速度爆弾の窓の中は打たない)");
         ImGui.InputTextMultiline("##LockEndCommands", ref C.LockEndCommands, 2000, new Vector2(400f, 60f));
         ImGuiEx.Text(EColor.YellowBright, "リプレイ中・dry run では打たずに履歴へ残すだけ。/ で始まらない行は打たない");
         ImGuiEx.Text(EColor.YellowBright, "発動の瞬間に詠唱していると向きが送られない (モジュールの仕様)");
@@ -1177,7 +1187,11 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGui.SliderFloat("爆発の何秒前から止める", ref C.BombTrueBefore, 0f, 10f, "%.1f");
         ImGui.SetNextItemWidth(150f);
         ImGui.SliderFloat("爆発の何秒後まで止める", ref C.BombTrueAfter, 0f, 3f, "%.1f");
-        ImGuiEx.Text(EColor.YellowBright, $"爆発の {BombReassertMs / 1000f:F1} 秒前にもう一度止め直す (トリガーラインに戻された場合の保険)");
+        ImGuiEx.Text("窓に入ったときに打つコマンド");
+        ImGui.InputTextMultiline("##BombStartCommands", ref C.BombStartCommands, 2000, new Vector2(400f, 60f));
+        ImGuiEx.Text("窓を出たときに打つコマンド (視線の固定中は打たない)");
+        ImGui.InputTextMultiline("##BombEndCommands", ref C.BombEndCommands, 2000, new Vector2(400f, 60f));
+        ImGuiEx.Text(EColor.YellowBright, $"爆発の {BombReassertMs / 1000f:F1} 秒前に「窓に入ったとき」のコマンドをもう一度打つ (トリガーラインに戻された場合の保険)");
     }
 
     // ---- Debug: 現在 ---------------------------------------------------------
@@ -1190,7 +1204,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Text($"発動まで: {(_state == State.None ? "-" : $"{(_waveEndMs - Environment.TickCount64) / 1000f:F2}s")}" +
                      $"  詠唱中: {(BasePlayer?.IsCasting == true ? "Y" : "N")}");
         ImGuiEx.Text($"計画: {Deg(_plannedRotation)}  送信済み: {Deg(_sentRotation)}  実際: {Deg(BasePlayer?.Rotation)}");
-        ImGuiEx.Text($"AE: {(_aeStopped ? "止めている" : "触っていない")}  理由: {(_aeReason == "" ? "-" : _aeReason)}  " +
+        ImGuiEx.Text($"AE を止めている理由: 視線の固定 {(_gazeStopping ? "Y" : "N")} / 本物の爆弾 {(_bombStopping ? "Y" : "N")}  " +
                      $"加速度爆弾: {BombText()}");
         if (_note != "") ImGuiEx.Text(EColor.YellowBright, _note);
 
