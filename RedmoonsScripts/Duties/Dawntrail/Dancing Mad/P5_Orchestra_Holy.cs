@@ -30,15 +30,14 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///
 /// 立ち位置 (アリーナの北が 12 時。ケフカは北のタンクを向いている):
 ///   2 回目の対象 (1 回目を受けていない非タンク 3 人)
-///       優先順 (非タンク 6 人の一列) を真ん中で折り返した組 (1 と 6 / 2 と 5 / 3 と 4) が 3 時 / 6 時 / 9 時。
-///       組のうち 2 回目の対象になった方が行く (R2 H2 M2 M1 H1 R1 なら R → 3 時、H → 6 時、M → 9 時)。距離はヒットボックス + HolyOffset
+///       優先順 (非タンク 6 人) を上から見て、2 回目の対象だけを拾った順に 3 時 → 6 時 → 9 時 (北から時計回り)。
+///       例: 優先順が 召喚 学者 リーパー … で、召喚が 1 回目を受けたら 学者 3 時 / リーパー 6 時 / …。距離はヒットボックス + HolyOffset
 ///   1 回目を受けた非タンク 3 人   南の外周 (ケフカから OuterRadius)
 ///   タンク 2 人                  北、ヒットボックス + TankReach (ぎりぎり殴れる位置)
 /// ケフカの位置とヒットボックスは毎フレーム実物から取る (ヒットボックスは計算式だと 1.5 × 3 = 4.5)。
 /// 8 人全員の担当を解いてから、自分の点だけを描く。
 ///
 /// 優先順が使えない / 2 回目の対象が 3 人にならないときは、2 回目の対象の点を出さない (履歴に理由を残す)。
-/// 組から 2 回目の対象がちょうど 1 人ずつにならないときは、残った人を一列の順に空いた方角へ入れ、履歴に警告を残す。
 ///
 /// 2 回目のホーリーが来たら、実際に当たった人・その瞬間の距離・近い 3 人を記録して「判定」に残す。
 /// 仮説 (近い 3 人に飛ぶ) と予定 (割り振り) の両方と突き合わせる。
@@ -129,7 +128,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         public PriorityData6 Priority = new()
         {
             Name = "P5 Orchestra Holy",
-            Description = "非タンク 6 人の一列。折り返した組 (1 と 6 / 2 と 5 / 3 と 4) が 3 時 / 6 時 / 9 時。組のうち 2 回目のホーリーの対象が行く",
+            Description = "非タンク 6 人。上から見て 2 回目のホーリーの対象だけを拾った順に 3 時 → 6 時 → 9 時",
         };
         public float HolyOffset = 0.5f;       // 2 回目の対象の点: ヒットボックスの縁から外へ
         public float TankReach = 3.0f;        // タンクの点: ヒットボックスの縁から外へ (近接は縁から 3)
@@ -179,7 +178,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(10, "Redmoon");
+    public override Metadata Metadata => new(11, "Redmoon");
     #endregion
 
     #region private properties
@@ -529,48 +528,25 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             Log($"  {pc.Name} {pc.Job} {pc.Role} {SlotText(pc.Slot)} 角度 {pc.Holy1Angle:F0}° 距離 {pc.Holy1Radius:F1}{(pc.Mine ? " (自分)" : "")}");
     }
 
-    /// <summary>2 回目の対象 3 人を、優先順の折り返しの組で 3 時 / 6 時 / 9 時に。優先順が使えなければ理由を返して点は出さない。</summary>
+    /// <summary>2 回目の対象 3 人を、優先順の上から拾った順に 3 時 → 6 時 → 9 時に。優先順が使えなければ理由を返して点は出さない。</summary>
     private string AssignHoly2()
     {
         var candidates = _partyDataList.Where(x => x.Role == Role.Holy2).ToList();
         if (candidates.Count != 3) return $"失敗: 2 回目の対象が {candidates.Count} 人";
 
-        // 優先順の 6 人を一列に並べ、真ん中で折り返した組 (1 番目と 6 番目 / 2 と 5 / 3 と 4) が 3 時 / 6 時 / 9 時。
-        // 組のうち 2 回目の対象になった方がその方角へ行く (R2 H2 M2 M1 H1 R1 なら R → 3 時、H → 6 時、M → 9 時)
-        var all = C.Priority.GetPlayers(_ => true);
-        if (all == null || all.Count != 6) return "失敗: 優先順が使えない (6 枠すべてが埋まっていて、6 人全員がパーティに居ること)";
-        var line = all.Select(x => _partyDataList.Find(p => p.EntityId == x.IGameObject?.EntityId)).ToList();
-        if (line.Any(x => x == null)) return "失敗: 優先順の人がパーティの表に居ない";
+        // 優先順を上から見て、2 回目の対象だけを拾った順に 3 時 → 6 時 → 9 時 (北から時計回り)
+        var ordered = C.Priority.GetPlayers(x => x.IGameObject is { } o && candidates.Any(c => c.EntityId == o.EntityId));
+        if (ordered == null) return "失敗: 優先順が使えない (6 枠すべてが埋まっていて、6 人全員がパーティに居ること)";
+        var list = ordered.Select(x => candidates.Find(c => c.EntityId == x.IGameObject?.EntityId)).OfType<PartyData>().Distinct().ToList();
+        if (list.Count != 3)
+            return $"失敗: 優先順で 3 人が並ばない ({list.Count} 人: {string.Join(", ", list.Select(x => x.Name))} / 対象: {string.Join(", ", candidates.Select(x => x.Name))})";
 
-        var parts = new List<string>();
-        var free = new List<int>();
-        for (var k = 0; k < 3; k++)
+        for (var i = 0; i < 3; i++)
         {
-            var pair = new[] { line[k]!, line[5 - k]! };
-            var takers = pair.Where(x => x.Role == Role.Holy2).ToList();
-            if (takers.Count == 1)
-            {
-                takers[0].Order = k;
-                takers[0].Slot = Holy2Slots[k];
-                parts.Add($"{SlotText(Holy2Slots[k])} ← {takers[0].Name} ({pair[0].Name} / {pair[1].Name} の組)");
-            }
-            else
-            {
-                free.Add(k);
-                Log($"警告: {SlotText(Holy2Slots[k])} の組 ({pair[0].Name} / {pair[1].Name}) で 2 回目の対象が {takers.Count} 人");
-            }
+            list[i].Order = i;
+            list[i].Slot = Holy2Slots[i];
         }
-
-        // 組が崩れた (1 回目が組から 1 人ずつになっていない) ときは、残った人を一列の順に空いた方角へ
-        var rest = line.Where(x => x!.Role == Role.Holy2 && x.Slot == Slot.None).ToList();
-        for (var i = 0; i < rest.Count && i < free.Count; i++)
-        {
-            rest[i]!.Order = free[i];
-            rest[i]!.Slot = Holy2Slots[free[i]];
-            parts.Add($"{SlotText(Holy2Slots[free[i]])} ← {rest[i]!.Name} (組が崩れたので一列の順)");
-        }
-        if (free.Count > 0) Log($"警告: 組で決まらなかった方角を一列の順で埋めた ({string.Join(", ", free.Select(k => SlotText(Holy2Slots[k])))})");
-        return string.Join(" / ", parts);
+        return string.Join(" / ", list.Select(x => $"{SlotText(x.Slot)} ← {x.Name}"));
     }
 
     private void JudgeHoly2()
@@ -731,7 +707,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /// <summary>ユーザー向けは優先順だけ。点の見た目は Registered elements の Edit、残りの調整は Debug の「設定」。</summary>
     private void DrawSettings()
     {
-        ImGuiEx.TextWrapped("優先順 (非タンク 6 人の一列)。真ん中で折り返した組 (1 と 6 / 2 と 5 / 3 と 4) が 3 時 / 6 時 / 9 時で、組のうち 2 回目のホーリーの対象が行く。例: R2 H2 M2 M1 H1 R1 なら R → 3 時、H → 6 時、M → 9 時");
+        ImGuiEx.TextWrapped("優先順 (非タンク 6 人)。上から見て、2 回目のホーリーの対象だけを拾った順に 3 時 → 6 時 → 9 時。ロール指定なら、各ロールが誰かは Edit Roles の割り当てで決まる");
         C.Priority.Draw();
     }
 
