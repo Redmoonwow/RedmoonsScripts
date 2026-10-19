@@ -84,7 +84,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         public string Name = "";
         public Job Job;
         public bool IsTank;
-        public bool Mine;
+        public bool Mine;             // BasePlayer (Base Player Override を含む) かどうか。RefreshMine で毎フレーム決め直す
 
         public bool Holy1Target;      // 1 回目のホーリーの中心にされた
         public int Holy1Hits;         // 1 回目のホーリーに当たった数 (巻き込み含む)
@@ -178,7 +178,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(7, "Redmoon");
+    public override Metadata Metadata => new(8, "Redmoon");
     #endregion
 
     #region private properties
@@ -595,13 +595,17 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
         var mine = _partyDataList.Find(x => x.Mine);
         // 位置・表示・文字・(グラデーションなら) 色だけ書く。半径や太さは Registered elements の Edit に任せる
-        if (mine != null && mine.Slot != Slot.None && Controller.TryGetElementByName(PointElement, out var e))
+        if (Controller.TryGetElementByName(PointElement, out var e))
         {
-            e.Enabled = true;
-            e.SetRefPosition(PointOf(mine.Slot, center, hitbox));
-            if (C.UseGradient) e.color = GradientColor.Get(C.Color1.ToVector4(), C.Color2.ToVector4()).ToUint();
-            // 秒は実時間なので、リプレイでは出さない
-            e.overlayText = !C.ShowText ? "" : Replay ? SlotText(mine.Slot) : $"{SlotText(mine.Slot)} {Math.Max(left, 0f):F1}";
+            // Base Player Override で担当の無い人に切り替えたら、前の人の点を残さない
+            e.Enabled = mine is { Slot: not Slot.None };
+            if (mine is { Slot: not Slot.None })
+            {
+                e.SetRefPosition(PointOf(mine.Slot, center, hitbox));
+                if (C.UseGradient) e.color = GradientColor.Get(C.Color1.ToVector4(), C.Color2.ToVector4()).ToUint();
+                // 秒は実時間なので、リプレイでは出さない
+                e.overlayText = !C.ShowText ? "" : Replay ? SlotText(mine.Slot) : $"{SlotText(mine.Slot)} {Math.Max(left, 0f):F1}";
+            }
         }
 
         if (!C.DebugDraw)
@@ -635,9 +639,17 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     private void HidePoints() => Controller.GetRegisteredElements().Each(x => x.Value.Enabled = false);
 
-    /// <summary>毎フレーム、全員の今の距離と近い順を取る (Debug の表と判定の確認用)。</summary>
+    /// <summary>「自分」を BasePlayer から決め直す。Splatoon の Base Player Override (この人として見る) をその場で反映するため。</summary>
+    private void RefreshMine()
+    {
+        var me = BasePlayer?.EntityId ?? 0;
+        foreach (var pc in _partyDataList) pc.Mine = pc.EntityId == me;
+    }
+
+    /// <summary>毎フレーム、自分・全員の今の距離と近い順を取る (Debug の表と判定の確認用)。</summary>
     private void UpdateLive()
     {
+        RefreshMine();
         var (center, _) = Kefka();
         foreach (var pc in _partyDataList)
         {
@@ -760,8 +772,10 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /// <summary>自分の点が引かれる場所と、このトライの判定結果だけ。</summary>
     private void DrawNowTab()
     {
+        RefreshMine();   // 終わった後でも、Base Player Override を切り替えたらその人の分を見せる
         var (center, hitbox) = Kefka();
         var mine = _partyDataList.Find(x => x.Mine);
+        ImGuiEx.Text($"自分: {BasePlayer?.Name.ToString() ?? "-"}{(Replay && global::Splatoon.Splatoon.BasePlayerOverride != "" ? " (Base Player Override)" : "")}");
         ImGuiEx.Text("引かれる場所");
         if (mine == null)
             ImGuiEx.Text("  - (まだオーケストラを見ていない / 自分がパーティの表に居ない)");
@@ -802,6 +816,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /// <summary>状態・ケフカ・5 つの点・8 人の表。現在タブから外したもの。</summary>
     private void DrawDetailTab()
     {
+        RefreshMine();
         var now = Environment.TickCount64;
         var (center, hitbox) = Kefka();
         ImGuiEx.Text($"状態: {_state}{(_test ? " (テスト)" : "")}");
