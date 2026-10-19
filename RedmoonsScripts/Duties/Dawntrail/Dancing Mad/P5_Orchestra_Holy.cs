@@ -46,8 +46,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// (スクリプトは位置・表示・文字と、グラデーションが ON のときの色しか書かない)。
 /// Debug 欄は 5 タブ:
 ///   設定   点の距離 (ホーリー・タンク・外周)、時間切れ、グラデーション、文字、Verbose log、Debug 表示、今の余地
-///   現在   状態、ケフカ、点の座標、8 人の表 (役・担当・1 回目の角度と距離・今の距離と近い順)
-///   判定   2 回目のホーリーの答え合わせ。このトライの分だけ (1 回目・2 回目のオーケストラ)。判定は毎回 dalamud.log にも出す
+///   現在   自分の点が引かれる場所と、このトライの判定結果 (1 回目・2 回目のオーケストラ)。判定は毎回 dalamud.log にも出す
+///   詳細   状態、ケフカ、5 つの点の座標、8 人の表 (役・担当・1 回目の角度と距離・今の距離と近い順・2 回目)
 ///   テスト 1 回目の対象を手で選んで、本物と同じ道で点を出す (今のターゲットをケフカの代わりにする)
 ///   履歴   判断ログ。VerboseLog が切れていても残す
 /// </remarks>
@@ -167,7 +167,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(5, "Redmoon");
+    public override Metadata Metadata => new(6, "Redmoon");
     #endregion
 
     #region private properties
@@ -279,7 +279,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     {
         if (_state == State.None) return;
         var now = Environment.TickCount64;
-        if (now - _startMs > C.TimeoutSeconds * 1000f)
+        // 時間切れは実時間で数える。リプレイは一時停止・スロー・シークで実時間と合わないので、時間切れにしない
+        // (シークでは Splatoon が OnReset を呼ぶので、そこで畳まれる)
+        if (!Replay && now - _startMs > C.TimeoutSeconds * 1000f)
         {
             Finish("時間切れ");
             return;
@@ -339,7 +341,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         ImGuiEx.EzTabBar("##P5OHDebug",
             ("設定", DrawConfigTab, null, false),
             ("現在", DrawNowTab, null, false),
-            ("判定", DrawJudgeTab, null, false),
+            ("詳細", DrawDetailTab, null, false),
             ("テスト", DrawTestTab, null, false),
             ("履歴", DrawHistoryTab, null, false));
     }
@@ -541,7 +543,8 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             e.Enabled = true;
             e.SetRefPosition(PointOf(mine.Slot, center, hitbox));
             if (C.UseGradient) e.color = GradientColor.Get(C.Color1.ToVector4(), C.Color2.ToVector4()).ToUint();
-            e.overlayText = C.ShowText ? $"{SlotText(mine.Slot)} {Math.Max(left, 0f):F1}" : "";
+            // 秒は実時間なので、リプレイでは出さない
+            e.overlayText = !C.ShowText ? "" : Replay ? SlotText(mine.Slot) : $"{SlotText(mine.Slot)} {Math.Max(left, 0f):F1}";
         }
 
         if (!C.DebugDraw)
@@ -697,7 +700,50 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     // ---- Debug: 現在 ----------------------------------------------------------
 
+    /// <summary>自分の点が引かれる場所と、このトライの判定結果だけ。</summary>
     private void DrawNowTab()
+    {
+        var (center, hitbox) = Kefka();
+        var mine = _partyDataList.Find(x => x.Mine);
+        ImGuiEx.Text("引かれる場所");
+        if (mine == null)
+            ImGuiEx.Text("  - (まだオーケストラを見ていない / 自分がパーティの表に居ない)");
+        else if (mine.Slot == Slot.None)
+            ImGuiEx.TextWrapped($"  担当なし ({mine.Role}) / 割り振り: {(_assignNote == "" ? "-" : _assignNote)}");
+        else
+        {
+            var p = PointOf(mine.Slot, center, hitbox);
+            var to = BasePlayer is { } me ? Distance2D(me.Position, p) : float.NaN;
+            ImGuiEx.Text($"  {SlotText(mine.Slot)}  ({p.X:F2}, {p.Z:F2})  ケフカから {PointRadiusOf(mine.Slot, hitbox):F2}  自分から {to:F2}");
+            ImGuiEx.Text($"  {(_state == State.Guide ? "表示中" : "表示していない")} / ケフカのヒットボックス {hitbox:F2}{(_kefkaId.GetObject() == null ? " (見つからない → 設定値)" : "")}");
+        }
+
+        ImGui.Separator();
+        ImGuiEx.Text("判定結果 (このトライ)");
+        if (_judges.Count == 0)
+        {
+            ImGuiEx.Text("  まだ 2 回目のホーリーを見ていない");
+            return;
+        }
+        for (var i = _judges.Count - 1; i >= 0; i--)
+        {
+            var j = _judges[i];
+            ImGui.Separator();
+            ImGuiEx.Text($"{j.Label}  (着弾 {j.Time})");
+            ImGuiEx.Text(ImGuiColors(j.PlannedMatch), $"予定どおり (割り振りの 3 人に飛んだ): {(j.PlannedMatch ? "Y" : "N")}");
+            ImGuiEx.Text(ImGuiColors(j.NearestMatch), $"仮説どおり (着弾時に近い 3 人に飛んだ): {(j.NearestMatch ? "Y" : "N")}");
+            ImGuiEx.TextWrapped($"予定: {j.Planned}");
+            ImGuiEx.TextWrapped($"中心: {j.Targets}");
+            ImGuiEx.TextWrapped($"当たり: {j.Hits}");
+            ImGuiEx.TextWrapped($"近い順 (着弾時): {j.Nearest}");
+            ImGuiEx.TextWrapped($"自分: {j.Mine}");
+        }
+    }
+
+    // ---- Debug: 詳細 ----------------------------------------------------------
+
+    /// <summary>状態・ケフカ・5 つの点・8 人の表。現在タブから外したもの。</summary>
+    private void DrawDetailTab()
     {
         var now = Environment.TickCount64;
         var (center, hitbox) = Kefka();
@@ -735,31 +781,6 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             entries.Add(new("着弾時の距離", () => ImGuiEx.Text(float.IsNaN(x.Holy2Radius) ? "-" : $"{x.Holy2Radius:F2}")));
         }
         ImGuiEx.EzTable(entries);
-    }
-
-    // ---- Debug: 判定 ----------------------------------------------------------
-
-    /// <summary>このトライの判定 (1 回目・2 回目のオーケストラ)。新しい順。前のトライの分は dalamud.log に残っている。</summary>
-    private void DrawJudgeTab()
-    {
-        if (_judges.Count == 0)
-        {
-            ImGuiEx.Text("まだ 2 回目のホーリーを見ていない");
-            return;
-        }
-        for (var i = _judges.Count - 1; i >= 0; i--)
-        {
-            var j = _judges[i];
-            ImGui.Separator();
-            ImGuiEx.Text($"{j.Label}  (着弾 {j.Time})");
-            ImGuiEx.Text(ImGuiColors(j.PlannedMatch), $"予定どおり (割り振りの 3 人に飛んだ): {(j.PlannedMatch ? "Y" : "N")}");
-            ImGuiEx.Text(ImGuiColors(j.NearestMatch), $"仮説どおり (着弾時に近い 3 人に飛んだ): {(j.NearestMatch ? "Y" : "N")}");
-            ImGuiEx.TextWrapped($"予定: {j.Planned}");
-            ImGuiEx.TextWrapped($"中心: {j.Targets}");
-            ImGuiEx.TextWrapped($"当たり: {j.Hits}");
-            ImGuiEx.TextWrapped($"近い順 (着弾時): {j.Nearest}");
-            ImGuiEx.TextWrapped($"自分: {j.Mine}");
-        }
     }
 
     // ---- Debug: テスト --------------------------------------------------------
@@ -807,6 +828,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     // ---- 小物 -----------------------------------------------------------------
 
     private static string NameOf(uint entityId) => entityId.GetObject()?.Name.ToString() ?? $"0x{entityId:X8}";
+
+    /// <summary>リプレイ再生中か。</summary>
+    private static bool Replay => ECommons.DalamudServices.Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.DutyRecorderPlayback];
 
     /// <summary>判断を履歴に残す。VerboseLog なら dalamud.log にも出す。</summary>
     private void Log(string message)
