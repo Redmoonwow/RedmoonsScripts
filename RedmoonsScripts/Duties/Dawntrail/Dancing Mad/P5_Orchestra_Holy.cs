@@ -166,7 +166,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(2, "Redmoon");
+    public override Metadata Metadata => new(3, "Redmoon");
     #endregion
 
     #region private properties
@@ -248,11 +248,18 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
                 _holy1Ms = now;
                 _state = State.CollectHoly1;
                 RecordHoly1(set);
+                ResolveIfHoly1Complete();
                 break;
             case State.CollectHoly1:
                 RecordHoly1(set);
+                ResolveIfHoly1Complete();
                 break;
-            case State.Guide when now - _holy1Ms >= Holy2MinGapMs:
+            case State.Guide when now - _holy1Ms < Holy2MinGapMs:
+                // 1 回目の 3 発がそろった後に来た遅い 1 発。割り振りは済んでいるので記録だけ
+                RecordHoly1(set);
+                Log("1 回目のホーリーが割り振りの後に来た (無視)");
+                break;
+            case State.Guide:
                 _holy2Ms = now;
                 SnapshotHoly2Radius();
                 _state = State.CollectHoly2;
@@ -277,6 +284,8 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         UpdateLive();
         if (_state == State.CollectHoly1 && now - _holy1Ms >= CollectMs)
         {
+            // 3 発そろわないまま時間が過ぎた (誰かが死んでいるなど)。あるもので割り振る
+            Log($"1 回目のホーリーが {CollectMs}ms で {_partyDataList.Count(x => x.Holy1Target)} 発。そのまま割り振る");
             Resolve();
             _state = State.Guide;
         }
@@ -307,6 +316,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         _assignNote = "";
         Log("戦闘開始: 初期化");
     }
+
+    /// <summary>Registered elements の上書きが Enabled=true で保存されていても、読み込み直後に出ないように。</summary>
+    public override void OnEnable() => HidePoints();
 
     public override void OnDisable()
     {
@@ -407,6 +419,14 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         return hits.Count > 0 ? (hits[0], $"着弾位置に一番近い当たり / AnimationTarget={set.Target?.Name}") : (null, $"AnimationTarget={set.Target?.Name}");
     }
 
+    /// <summary>非タンク 3 人が 1 回目の中心になった時点で、300ms を待たずに割り振る (動ける時間を削らない)。</summary>
+    private void ResolveIfHoly1Complete()
+    {
+        if (_partyDataList.Count(x => x.Holy1Target && !x.IsTank) < 3) return;
+        Resolve();
+        _state = State.Guide;
+    }
+
     private void SnapshotHoly2Radius()
     {
         var (center, _) = Kefka();
@@ -450,7 +470,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         if (candidates.Count != 3) return $"失敗: 2 回目の対象が {candidates.Count} 人";
 
         var ordered = C.Priority.GetPlayers(x => x.IGameObject is { } o && candidates.Any(c => c.EntityId == o.EntityId));
-        if (ordered == null) return "失敗: 優先順が設定されていない / パーティと合わない";
+        if (ordered == null) return "失敗: 優先順が使えない (6 枠すべてが埋まっていて、6 人全員がパーティに居ること)";
         var list = ordered.Select(x => candidates.Find(c => c.EntityId == x.IGameObject?.EntityId)).OfType<PartyData>().Distinct().ToList();
         if (list.Count != 3)
             return $"失敗: 優先順で 3 人が並ばない ({list.Count} 人: {string.Join(", ", list.Select(x => x.Name))} / 対象: {string.Join(", ", candidates.Select(x => x.Name))})";
@@ -512,7 +532,13 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             e.overlayText = C.ShowText ? $"{SlotText(mine.Slot)} {Math.Max(left, 0f):F1}" : "";
         }
 
-        if (!C.DebugDraw) return;
+        if (!C.DebugDraw)
+        {
+            // 途中で切られたら、出していた Debug 用の円を消す
+            foreach (var x in Controller.GetRegisteredElements())
+                if (x.Key.StartsWith("Dbg")) x.Value.Enabled = false;
+            return;
+        }
         foreach (var slot in DebugSlots)
             if (Controller.TryGetElementByName($"Dbg{slot}", out var d))
             {
@@ -542,7 +568,10 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     {
         var (center, _) = Kefka();
         foreach (var pc in _partyDataList)
+        {
             pc.LiveRadius = pc.Object is { } o ? Distance2D(o.Position, center) : float.NaN;
+            pc.LiveRank = -1;
+        }
         var rank = 0;
         foreach (var pc in _partyDataList.Where(x => !float.IsNaN(x.LiveRadius)).OrderBy(x => x.LiveRadius))
             pc.LiveRank = rank++;
