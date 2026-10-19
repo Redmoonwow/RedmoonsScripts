@@ -66,6 +66,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///          このトライの判定 (1 回目・2 回目のオーケストラ)。判定は毎回 dalamud.log にも出す
 ///   テスト 1 回目の対象を手で選んで、本物と同じ道で点を出す (今のターゲットをケフカの代わりにする)
 ///   組み合わせ 2 回目の対象 3 人の 20 通りごとの割り振り (本番と同じ計算)。「流す」でその組み合わせの点を出す
+/// テスト中と Debug 表示 ON のときは、十字の 5 人 (タンク 2 人 + 2 回目の対象 3 人) それぞれから、その人の点へ線 (TestTether0〜4) も引く
 ///   履歴   判断ログ。VerboseLog が切れていても残す
 /// </remarks>
 internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Config>
@@ -207,6 +208,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     private const int OuterClock = 6;            // 1 回目を受けた人の外周の点は南 (6 時) 固定
     private const string PointElement = "Point";
+    private const int TestTetherCount = 5;       // テスト中の線: タンク 2 人 + 2 回目の対象 3 人
     #endregion
 
     #region public properties
@@ -214,7 +216,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(15, "Redmoon");
+    public override Metadata Metadata => new(16, "Redmoon");
     #endregion
 
     #region private properties
@@ -283,6 +285,19 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             Filled = false,
             color = 0x96FFFFFF,
         });
+        // テスト中 / Debug 表示中: 十字の 5 人 (タンク 2 人 + 2 回目の対象 3 人) それぞれから、その人の点への線
+        for (var i = 0; i < TestTetherCount; i++)
+            Controller.RegisterElement($"TestTether{i}", new Element(2)
+            {
+                Enabled = false,
+                radius = 0f,
+                thicc = 6f,
+                color = 0xC8FFFF00,
+                LineEndB = Splatoon.Serializables.LineEnd.Arrow,
+                overlayBGColor = 0xC8000000,
+                overlayTextColor = 0xFFFFFFFF,
+                overlayVOffset = 1.5f,
+            });
     }
 
     public override void OnStartingCast(uint source, uint castId)
@@ -721,6 +736,8 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             }
         }
 
+        ShowTestTethers(center, hitbox);
+
         if (!C.DebugDraw)
         {
             // 途中で切られたら、出していた Debug 用の円を消す
@@ -750,6 +767,29 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             h.Enabled = true;
             h.radius = hitbox;   // ヒットボックスそのものを見せる円なので、半径はスクリプトが書く
             h.SetRefPosition(center);
+        }
+    }
+
+    /// <summary>
+    /// テスト中 (テスト / 組み合わせタブの「流す」) か Debug 表示 ON のとき、十字の 5 人 (タンク 2 人 + 2 回目の対象 3 人) それぞれのキャラから、
+    /// その人の点へ線を引く。自分以外がどこへ行くかを一度に見るため。それ以外のときは消す。
+    /// </summary>
+    private void ShowTestTethers(Vector3 center, float hitbox)
+    {
+        var show = _test || C.DebugDraw;
+        var cross = _partyDataList.Where(x => x.Spot == Spot.Tank)
+            .Concat(_partyDataList.Where(x => x.Spot == Spot.Holy).OrderBy(x => x.Order))
+            .ToList();
+        for (var i = 0; i < TestTetherCount; i++)
+        {
+            if (!Controller.TryGetElementByName($"TestTether{i}", out var t)) continue;
+            var pc = show && i < cross.Count ? cross[i] : null;
+            t.Enabled = pc?.Object != null;
+            if (pc?.Object is not { } o) continue;
+            t.SetRefPosition(o.Position);
+            t.SetOffPosition(PointOf(pc.Spot, pc.Clock, center, hitbox));
+            if (C.UseGradient) t.color = GradientColor.Get(C.Color1.ToVector4(), C.Color2.ToVector4()).ToUint();
+            t.overlayText = $"{pc.Name.Split(' ')[0]} {pc.Clock}時";
         }
     }
 
