@@ -42,7 +42,10 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 2 回目のホーリーが来たら、実際に当たった人・その瞬間の距離・近い 3 人を記録して「判定」に残す。
 /// 仮説 (近い 3 人に飛ぶ) と予定 (割り振り) の両方と突き合わせる。
 ///
-/// 設定画面の Debug 欄は 4 タブ:
+/// 設定画面: ユーザー向けは優先順だけ。点の見た目は Splatoon の Registered elements の Edit で変える
+/// (スクリプトは位置・表示・文字と、グラデーションが ON のときの色しか書かない)。
+/// Debug 欄は 5 タブ:
+///   設定   点の距離 (ホーリー・タンク・外周)、時間切れ、グラデーション、文字、Verbose log、Debug 表示、今の余地
 ///   現在   状態、ケフカ、点の座標、8 人の表 (役・担当・1 回目の角度と距離・今の距離と近い順)
 ///   判定   直近の 2 回目のホーリーの答え合わせ
 ///   テスト 1 回目の対象を手で選んで、本物と同じ道で点を出す (今のターゲットをケフカの代わりにする)
@@ -122,8 +125,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         public float TankReach = 3.0f;        // タンクの点: ヒットボックスの縁から外へ (近接は縁から 3)
         public float OuterRadius = 19f;       // 1 回目を受けた人の点: ケフカから (フィールドは半径 20 と推定)
         public float FallbackHitbox = 4.5f;   // ケフカが見つからないときのヒットボックス
-        public float PointRadius = 0.6f;      // 点の円の半径
-        public float Thickness = 15f;
+        // 点の見た目 (半径・太さ・色など) は Splatoon の Registered elements の Edit で変える。スクリプトは書かない。
+        // 例外はグラデーション (毎フレーム色を書く) と文字 (担当と秒を書く)。どちらも切れる
+        public bool UseGradient = true;
         public uint Color1 = 0xC8FFFF00;      // グラデーション (ABGR)。2 色を同じにすると単色
         public uint Color2 = 0xC8FF00FF;
         public bool ShowText = true;
@@ -162,7 +166,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(1, "Redmoon");
+    public override Metadata Metadata => new(2, "Redmoon");
     #endregion
 
     #region private properties
@@ -315,6 +319,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         DrawSettings();
         if (!ImGuiEx.CollapsingHeader("Debug")) return;
         ImGuiEx.EzTabBar("##P5OHDebug",
+            ("設定", DrawConfigTab, null, false),
             ("現在", DrawNowTab, null, false),
             ("判定", DrawJudgeTab, null, false),
             ("テスト", DrawTestTab, null, false),
@@ -498,13 +503,12 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         var left = (_holy1Ms + ExpectedHoly2Ms - now) / 1000f;
 
         var mine = _partyDataList.Find(x => x.Mine);
+        // 位置・表示・文字・(グラデーションなら) 色だけ書く。半径や太さは Registered elements の Edit に任せる
         if (mine != null && mine.Slot != Slot.None && Controller.TryGetElementByName(PointElement, out var e))
         {
             e.Enabled = true;
             e.SetRefPosition(PointOf(mine.Slot, center, hitbox));
-            e.radius = C.PointRadius;
-            e.thicc = C.Thickness;
-            e.color = GradientColor.Get(C.Color1.ToVector4(), C.Color2.ToVector4()).ToUint();
+            if (C.UseGradient) e.color = GradientColor.Get(C.Color1.ToVector4(), C.Color2.ToVector4()).ToUint();
             e.overlayText = C.ShowText ? $"{SlotText(mine.Slot)} {Math.Max(left, 0f):F1}" : "";
         }
 
@@ -526,7 +530,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         if (Controller.TryGetElementByName("DbgHitbox", out var h))
         {
             h.Enabled = true;
-            h.radius = hitbox;
+            h.radius = hitbox;   // ヒットボックスそのものを見せる円なので、半径はスクリプトが書く
             h.SetRefPosition(center);
         }
     }
@@ -597,11 +601,18 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     // ---- 設定 -----------------------------------------------------------------
 
+    /// <summary>ユーザー向けは優先順だけ。点の見た目は Registered elements の Edit、残りの調整は Debug の「設定」。</summary>
     private void DrawSettings()
     {
         ImGuiEx.Text("優先順 (非タンク 6 人。2 回目のホーリーの 3 人をこの順に 3 時 / 6 時 / 9 時)");
         C.Priority.Draw();
-        ImGui.Separator();
+    }
+
+    // ---- Debug: 設定 ----------------------------------------------------------
+
+    private void DrawConfigTab()
+    {
+        ImGuiEx.TextWrapped("点の見た目 (半径・太さ・色・文字の大きさなど) は Registered elements の Point を Edit で変える。スクリプトが書くのは位置・表示・文字と、グラデーションが ON のときの色だけ。");
         ImGui.SetNextItemWidth(150f);
         ImGui.DragFloat("ホーリーの点: ヒットボックスの縁から", ref C.HolyOffset, 0.05f, -2f, 3f, "%.2f");
         ImGui.SetNextItemWidth(150f);
@@ -610,13 +621,13 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         ImGui.DragFloat("外周の点: ケフカから", ref C.OuterRadius, 0.1f, 5f, 25f, "%.1f");
         ImGui.SetNextItemWidth(150f);
         ImGui.DragFloat("ケフカが居ないときのヒットボックス", ref C.FallbackHitbox, 0.05f, 0f, 10f, "%.2f");
-        ImGui.SetNextItemWidth(150f);
-        ImGui.DragFloat("点の半径", ref C.PointRadius, 0.05f, 0.1f, 3f, "%.2f");
-        ImGui.SetNextItemWidth(150f);
-        ImGui.DragFloat("太さ", ref C.Thickness, 0.5f, 1f, 30f, "%.1f");
-        DrawColor("グラデーション 1", ref C.Color1);
-        ImGui.SameLine();
-        DrawColor("グラデーション 2", ref C.Color2);
+        ImGui.Checkbox("グラデーション (OFF なら Edit で決めた色のまま)", ref C.UseGradient);
+        if (C.UseGradient)
+        {
+            DrawColor("グラデーション 1", ref C.Color1);
+            ImGui.SameLine();
+            DrawColor("グラデーション 2", ref C.Color2);
+        }
         ImGui.Checkbox("文字を出す (担当と 2 回目までの秒)", ref C.ShowText);
         ImGui.SetNextItemWidth(150f);
         ImGui.DragFloat("時間切れ (秒)", ref C.TimeoutSeconds, 0.5f, 5f, 30f, "%.1f");
