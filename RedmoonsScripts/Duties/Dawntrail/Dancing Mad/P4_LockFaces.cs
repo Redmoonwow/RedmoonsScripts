@@ -55,6 +55,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// (内向き) なら、AE が技を撃って振り向いても困らないので止めない (NoStopWhenInward)。
 /// 止める/戻すは UpdateAeStop の 1 か所で毎フレーム決める。視線の固定解除 (/aestop off) が
 /// 本物の爆弾の直前に来て、爆発の瞬間に AE が動いてしまう取り合いを防ぐため。
+/// forPotato (Redmoon ACR) は 詠唱禁止 → 停手 の 2 段。forVivi (詠唱の無いジョブ) はその停手だけ。どちらも既定 OFF。
+/// forPotato の詠唱禁止は、視線の後も回ごとに決めた秒だけ続けられる (1 回目の後は動くので詠唱を始めない)。
 ///
 /// 設定画面の Debug 欄は 5 タブ:
 ///   現在   今の波、真上から見たレーダー、発動の瞬間に取った判定 (次の発動まで残る)、
@@ -129,6 +131,29 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float BombTrueAfter = 0.3f;     // 爆発の何秒後まで止めるか
         public string BombStartCommands = "/aestop on";   // 爆弾の窓に入ったときに打つコマンド
         public string BombEndCommands = "/aestop off";    // 爆弾の窓を出たときに打つコマンド (視線の固定中は打たない)
+
+        // ---- forPotato: Redmoon ACR 用の 2 段止め (既定 OFF。OFF なら上の設定のまま動く) ----
+        // 1 段目: 詠唱禁止 (詠唱技と突進だけ止める。瞬間技は撃つ) / 2 段目: AE の停手 (全部止める)
+        public bool ForPotato = false;
+        public float PotatoGazeStopBefore = 0.5f;       // 視線: 発動の何秒前から停手 (詠唱禁止は波をつかんだ時から)
+        public float PotatoBombNoCastBefore = 4.0f;     // 本物の爆弾: 爆発の何秒前から詠唱禁止 (0 = 爆弾では詠唱禁止にしない)。vbm が爆発 1.0 秒前に詠唱を切るので、最長の詠唱 3.0 + 1.0
+        public float PotatoBombStopBefore = 0.8f;       // 本物の爆弾: 爆発の何秒前から停手 (硬直 0.3 + 余裕 0.5)
+        public float PotatoBombAfter = 0.1f;            // 本物の爆弾: 爆発の何秒後まで止めるか
+        // 視線: 発動 + Hold after の後も詠唱禁止を続ける秒。視線の順にカンマ区切り (1 回目,2 回目)。書いていない回と 0 は延ばさない
+        // 1 回目の後はどきどきアルテマ (発動 +9 秒前後) まで動くので、その間に詠唱を始めないように
+        public string PotatoGazeNoCastAfter = "9,0";
+        // 視線の後に延ばした詠唱禁止は、床の中心 (100, 0, 100) からこの距離 (m、水平) に入ったら解く (0 = 解かない)。
+        // 視線の後は中心へ寄るので、着いたら詠唱してよい。一度解いたらその回は戻さない
+        public float PotatoGazeNoCastReleaseRadius = 0.8f;
+        public string PotatoNoCastOnCommands = "/Redmoon_Summoner NoCast_on";
+        public string PotatoNoCastOffCommands = "/Redmoon_Summoner NoCast_off";
+        public string PotatoStopOnCommands = "/aestop on";
+        public string PotatoStopOffCommands = "/aestop off";
+        public bool PotatoRetarget = true;              // 停手を解いたらケフカをターゲットし直す (停手はターゲットを外すため)
+
+        // ---- forVivi: 詠唱の無いジョブ (詩人) 用 (既定 OFF) ----
+        // forPotato の停手だけを使い、詠唱禁止のコマンドは打たない。時間は上の Potato* を共用する。forPotato より優先
+        public bool ForVivi = false;
 
         // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
         public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
@@ -462,7 +487,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(14, "Redmoon");
+    public override Metadata Metadata => new(15, "Redmoon");
 
     #endregion
 
@@ -498,6 +523,11 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private long _bombExpiryMs;          // 自分の加速度爆弾が爆発する時刻 (TickCount64)。0 = 付いていない
     private bool _bombFake;              // 嘘 = 動けばよい爆弾。AE は触らない
     private bool _bombReasserted;        // 爆発直前の打ち直しをしたか
+    private bool _potatoNoCast;          // forPotato: 詠唱禁止の ON コマンドを打ち、まだ OFF にしていない
+    private bool _potatoStop;            // forPotato: 停手の ON コマンドを打ち、まだ OFF にしていない
+    private bool _potatoReasserted;      // forPotato: 爆発直前の停手の打ち直しをしたか
+    private int _gazeWaveNo;             // この戦闘で何回目の視線の波か (テスト波は数えない)
+    private long _gazeNoCastUntilMs;     // forPotato: 視線の後も詠唱禁止を続ける時刻 (TickCount64)。0 = 延ばさない
 
     // ---- 波をまたいで残す。OnReset で戻す ------------------------------------
     private long _lastWaveEndMs;         // 直前に処理した波。切れかけのデバフでつかみ直さないため
@@ -582,6 +612,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _fakeStatuses.Clear();
         _lastWaveEndMs = 0;
         _lastSnapFireMs = 0;
+        _gazeWaveNo = 0;
+        _gazeNoCastUntilMs = 0;
+        UpdateAeStop();   // 視線の後の詠唱禁止を延ばしていたら戻す
     }
 
     public override void OnUpdate()
@@ -731,6 +764,13 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         _note = !_dryRun ? "" : forceDry ? "dry run (テスト)" : "dry run (リプレイ中か Daily Routines が無い)";
         var members = string.Join(", ", _wave.Select(w => $"{w.Name}={(w.Fake ? "嘘" : "本物")}"));
         Log($"{origin}: 発動まで {(endMs - Environment.TickCount64) / 1000f:F2}s / {members} / state={_state} dry={_dryRun}");
+        if (!forceDry)
+        {
+            _gazeWaveNo++;
+            var after = GazeNoCastAfter(_gazeWaveNo);
+            _gazeNoCastUntilMs = after > 0f && !_dryRun ? endMs + (long)((C.HoldSeconds + after) * 1000f) : 0;
+            if (after > 0f) Log($"視線 {_gazeWaveNo} 回目: 発動 + Hold after の後も詠唱禁止を {after:F1}s 続ける");
+        }
 
         BeginSnapshot(endMs, true);
         if (_snapFireMs != 0) _snapHeader = $"{origin} / {members} / dry={_dryRun}";
@@ -824,6 +864,13 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// </remarks>
     private void UpdateAeStop()
     {
+        if (C.ForPotato || C.ForVivi)
+        {
+            ReleaseClassicStop(C.ForVivi ? "forVivi に切り替えた" : "forPotato に切り替えた");
+            UpdatePotatoStop();
+            return;
+        }
+        ReleasePotatoStop("forPotato / forVivi を切った");
         var now = Environment.TickCount64;
         var bomb = BombWindow(now);
         var gaze = _lockStarted && !_dryRun && _gazeNeedsStop;
@@ -850,6 +897,117 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         {
             _bombReasserted = true;
             RunCommands("加速度爆弾 (本物): 爆発直前の打ち直し", C.BombStartCommands, Replay);
+        }
+    }
+
+    /// <summary>forPotato の 2 段止め。毎フレーム呼ぶ。</summary>
+    /// <remarks>
+    /// 詠唱禁止: 視線の波をつかんでから (Lock before 秒前) 発動 + Hold after まで / 本物の爆弾の爆発 3.5 秒前 〜 + 0.1 秒。
+    /// 停手: 視線は発動 0.5 秒前 〜 + Hold after (外向きのときだけ) / 本物の爆弾は 0.8 秒前 〜 + 0.1 秒。
+    /// 停手を QT「小休止」にしないのは、AE が実行中の枠 (GCD + 能力技) を最後まで撃つため。停手なら AI ループごと止まる。
+    /// 解除の後はケフカをターゲットし直す (停手はターゲットを外す)。
+    /// forVivi (詠唱の無いジョブ) は停手だけ。詠唱禁止は打たない (途中で切り替えたら OFF を打って戻す)。
+    /// </remarks>
+    private void UpdatePotatoStop()
+    {
+        var now = Environment.TickCount64;
+        var waveActive = _state != State.None && !_dryRun;
+        var waveEnd = _waveEndMs + (long)(C.HoldSeconds * 1000f);
+        // 延ばした分は、波を終えた後 (発動 + Hold after より後) に中心へ入ったら解く
+        if (_gazeNoCastUntilMs != 0 && C.PotatoGazeNoCastReleaseRadius > 0f && now > waveEnd && BasePlayer is { } me
+            && Vector2.Distance(new Vector2(me.Position.X, me.Position.Z), new Vector2(100f, 100f)) <= C.PotatoGazeNoCastReleaseRadius)
+        {
+            _gazeNoCastUntilMs = 0;
+            Log($"視線の後の詠唱禁止: 中心から {C.PotatoGazeNoCastReleaseRadius:F1}m 以内に入ったので解いた");
+        }
+        var gazeAfter = _gazeNoCastUntilMs != 0 && now <= _gazeNoCastUntilMs;   // 視線の後に延ばした分 (波を終えた後も続く)
+        var gazeNoCast = (waveActive && now <= waveEnd) || gazeAfter;
+        var gazeStop = waveActive && _lockStarted && _gazeNeedsStop
+                       && now >= _waveEndMs - (long)(C.PotatoGazeStopBefore * 1000f) && now <= waveEnd;
+        var bombReal = C.BombControl && _bombExpiryMs != 0 && !_bombFake;
+        var bombAfter = _bombExpiryMs + (long)(C.PotatoBombAfter * 1000f);
+        var bombNoCast = bombReal && C.PotatoBombNoCastBefore > 0f && now >= _bombExpiryMs - (long)(C.PotatoBombNoCastBefore * 1000f) && now <= bombAfter;
+        var bombStop = bombReal && now >= _bombExpiryMs - (long)(C.PotatoBombStopBefore * 1000f) && now <= bombAfter;
+
+        var noCast = !C.ForVivi && (gazeNoCast || bombNoCast);
+        var stop = gazeStop || bombStop;
+
+        if (noCast && !_potatoNoCast)
+        {
+            _potatoNoCast = true;
+            RunCommands($"forPotato: 詠唱禁止 ON ({(gazeNoCast ? (waveActive ? "視線" : "視線の後") : "加速度爆弾")})", C.PotatoNoCastOnCommands, Replay);
+        }
+        if (stop && !_potatoStop)
+        {
+            _potatoStop = true;
+            _potatoReasserted = false;
+            RunCommands($"forPotato: 停手 ON ({(gazeStop ? "視線" : "加速度爆弾")})", C.PotatoStopOnCommands, Replay);
+        }
+        if (bombStop && !_potatoReasserted && now >= _bombExpiryMs - BombReassertMs)
+        {
+            _potatoReasserted = true;
+            RunCommands("forPotato: 爆発直前の停手の打ち直し", C.PotatoStopOnCommands, Replay);
+        }
+        if (!stop && _potatoStop)
+        {
+            _potatoStop = false;
+            RunCommands("forPotato: 停手 OFF", C.PotatoStopOffCommands, Replay);
+            if (C.PotatoRetarget && !Replay) RetargetKefka();
+        }
+        if (!noCast && _potatoNoCast)
+        {
+            _potatoNoCast = false;
+            RunCommands("forPotato: 詠唱禁止 OFF", C.PotatoNoCastOffCommands, Replay);
+        }
+    }
+
+    /// <summary>視線 n 回目 (1 始まり) の後に詠唱禁止を続ける秒。PotatoGazeNoCastAfter のカンマ区切り。書いていない回は 0。</summary>
+    private float GazeNoCastAfter(int n)
+    {
+        var parts = C.PotatoGazeNoCastAfter.Split(',');
+        if (n < 1 || n > parts.Length) return 0f;
+        return float.TryParse(parts[n - 1].Trim(), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) && v > 0f ? v : 0f;
+    }
+
+    /// <summary>forPotato で止めていたものを戻す (設定を切った / リセット)。</summary>
+    private void ReleasePotatoStop(string reason)
+    {
+        if (_potatoStop)
+        {
+            _potatoStop = false;
+            RunCommands($"forPotato: 停手 OFF ({reason})", C.PotatoStopOffCommands, Replay);
+        }
+        if (_potatoNoCast)
+        {
+            _potatoNoCast = false;
+            RunCommands($"forPotato: 詠唱禁止 OFF ({reason})", C.PotatoNoCastOffCommands, Replay);
+        }
+    }
+
+    /// <summary>今までの止め方で止めていたものを戻す (forPotato に切り替えた)。</summary>
+    private void ReleaseClassicStop(string reason)
+    {
+        if (_gazeStopping)
+        {
+            _gazeStopping = false;
+            if (!_bombStopping) RunCommands($"視線の固定: 解除 ({reason})", C.LockEndCommands, Replay);
+        }
+        if (_bombStopping)
+        {
+            _bombStopping = false;
+            RunCommands($"加速度爆弾 (本物): 窓を出た ({reason})", C.BombEndCommands, Replay);
+        }
+    }
+
+    /// <summary>ケフカ (18475) をターゲットする。停手を解いた後に呼ぶ。</summary>
+    private void RetargetKefka()
+    {
+        if (Svc.Objects.FirstOrDefault(x => x.BaseId == 18475 && x.IsTargetable) is { } kefka &&
+            Svc.Targets.Target?.EntityId != kefka.EntityId)
+        {
+            Svc.Targets.Target = kefka;
+            Log("forPotato: ケフカをターゲットし直した");
         }
     }
 
@@ -1268,6 +1426,48 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Text("窓を出たときに打つコマンド (視線の固定中は打たない)");
         ImGui.InputTextMultiline("##BombEndCommands", ref C.BombEndCommands, 2000, new Vector2(400f, 60f));
         ImGuiEx.Text(EColor.YellowBright, $"爆発の {BombReassertMs / 1000f:F1} 秒前に「窓に入ったとき」のコマンドをもう一度打つ (トリガーラインに戻された場合の保険)");
+        DrawPotatoSettings();
+    }
+
+    /// <summary>forPotato (Redmoon ACR 用の 2 段止め) の設定。既定 OFF。</summary>
+    private void DrawPotatoSettings()
+    {
+        ImGui.Separator();
+        ImGui.Checkbox("forPotato (Redmoon ACR 用の 2 段止め)", ref C.ForPotato);
+        ImGuiEx.Tooltip("ON にすると、上の視線・爆弾のコマンドの代わりに、詠唱禁止 (Redmoon ACR の QT) → 停手 の 2 段で止める。Redmoon ACR を使わないなら OFF のまま");
+        ImGui.Checkbox("forVivi (詠唱の無いジョブ用。停手だけ)", ref C.ForVivi);
+        ImGuiEx.Tooltip("ON にすると forPotato の停手だけで止め、詠唱禁止のコマンドは打たない (詩人など)。時間は下の設定を共用する。forPotato より優先");
+        if (!C.ForPotato && !C.ForVivi) return;
+        if (C.ForVivi)
+            ImGuiEx.Text(EColor.YellowBright, "forVivi: 詠唱禁止は打たない。視線・本物の爆弾の直前だけ停手");
+        else
+            ImGuiEx.Text(EColor.YellowBright, "詠唱禁止は視線の波をつかんだ時 (Lock before 秒前) から。最長の詠唱 3.0 秒より長くするなら Lock before を 3.5 に");
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("視線: 発動の何秒前から停手", ref C.PotatoGazeStopBefore, 0f, 3f, "%.1f");
+        if (!C.ForVivi)
+        {
+            ImGui.SetNextItemWidth(150f);
+            ImGui.InputText("視線: 発動の後も詠唱禁止 (秒、1 回目,2 回目)", ref C.PotatoGazeNoCastAfter, 64);
+            ImGuiEx.Tooltip("発動 + Hold after の後も詠唱禁止を続ける秒。瞬間技 (ルインジャなど) は撃つ。0 か空欄なら延ばさない");
+            ImGui.SetNextItemWidth(150f);
+            ImGui.SliderFloat("視線の後: 中心からこの距離に入ったら解く (m、0 = 解かない)", ref C.PotatoGazeNoCastReleaseRadius, 0f, 5f, "%.1f");
+            ImGui.SetNextItemWidth(150f);
+            ImGui.SliderFloat("爆弾: 爆発の何秒前から詠唱禁止 (0 = しない)", ref C.PotatoBombNoCastBefore, 0f, 10f, "%.1f");
+        }
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("爆弾: 爆発の何秒前から停手", ref C.PotatoBombStopBefore, 0f, 5f, "%.1f");
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("爆弾: 爆発の何秒後まで", ref C.PotatoBombAfter, 0f, 3f, "%.1f");
+        ImGui.Checkbox("停手を解いたらケフカをターゲットし直す", ref C.PotatoRetarget);
+        if (!C.ForVivi)
+        {
+            ImGuiEx.Text("詠唱禁止 ON / OFF のコマンド");
+            ImGui.InputTextMultiline("##PotatoNoCastOn", ref C.PotatoNoCastOnCommands, 2000, new Vector2(400f, 40f));
+            ImGui.InputTextMultiline("##PotatoNoCastOff", ref C.PotatoNoCastOffCommands, 2000, new Vector2(400f, 40f));
+        }
+        ImGuiEx.Text("停手 ON / OFF のコマンド");
+        ImGui.InputTextMultiline("##PotatoStopOn", ref C.PotatoStopOnCommands, 2000, new Vector2(400f, 40f));
+        ImGui.InputTextMultiline("##PotatoStopOff", ref C.PotatoStopOffCommands, 2000, new Vector2(400f, 40f));
     }
 
     // ---- Debug: 現在 ---------------------------------------------------------
