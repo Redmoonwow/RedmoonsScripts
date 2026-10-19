@@ -36,11 +36,11 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   1 回目を受けた非タンク 3 人   南の外周 (ケフカから OuterRadius)
 /// 十字の向き (Layout):
 ///   TankFixed (Default、タンク A 固定)  タンク 0 時 / 対象 3 時 / 6 時 / 9 時
-///   Rotate (移動の少ない向き)           十字を 30° 刻みで回し、仮定の出発点からの移動の合計 (タンク + 対象 3 人) が一番少ない向き。
+///   Rotate (移動の少ない向き)           十字を 30° 刻みで回し、仮定の出発点から動く量が少ない向き。長く動くのは M2 / M1 の枠に回す。
 ///       出発点 (仮定): タンク 北、優先順の 1〜6 番目 = 北東 / 東 / 南東 / 南 / 南西 / 西 (8 方向散開)、半径 SpreadRadius。
 ///       実際の位置を使わないのは、各自の画面で別々に計算しても同じ答えになるようにするため。
-///       同じ合計なら、一番動く人の距離が短い方 → 0 時に近い方
-///       例: 召喚 (R2) 学者 (H2) リーパー (M2) が対象なら タンク 10 時 / 召喚 1 時 / 学者 4 時 / リーパー 7 時
+///       決め方: 遠隔・ヒーラーの枠 (優先順の 3・4 番目以外) の一番大きい移動が短い → 移動の合計 (タンク + 3 人) が短い → 0 時に近い
+///       例: 東 (R2 H2 M2) → タンク 10 時 / R2 1 時 / H2 4 時 / M2 7 時、西 (M1 H1 R1) → タンク 1 時 / M1 4 時 / H1 7 時 / R1 10 時
 /// ケフカの位置とヒットボックスは毎フレーム実物から取る (実測 8.01。ModelSkeleton × Scale の計算式の 4.5 は外れ)。
 /// ケフカの円は大きく、クリアログの 2 回目の対象は円の内側 (4.5〜6.8) に立っている。タンクは近接の届く 8.01 + 3 まで下がれる。
 /// 8 人全員の担当を解いてから、自分の点だけを描く。
@@ -213,7 +213,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(13, "Redmoon");
+    public override Metadata Metadata => new(14, "Redmoon");
     #endregion
 
     #region private properties
@@ -603,9 +603,14 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     }
 
     /// <summary>
-    /// Rotate: 十字を 30° 刻みで回し、仮定の出発点からの移動の合計 (タンク + 対象 3 人) が一番少ないタンクの時計の位置。
+    /// Rotate: 十字を 30° 刻みで回したときの、タンクの時計の位置。決め方 (各自の画面で同じ答えになるよう、決まった順で比べる):
+    ///   1. 遠隔・ヒーラーの枠 (優先順の 3・4 番目 = 南東・南の M2 / M1 以外) の対象のうち、一番大きい移動が短い
+    ///   2. 移動の合計 (タンク + 対象 3 人) が短い
+    ///   3. 0 時に近い
+    /// 長く動く役 (十字と 8 方向散開がずれる分) は M1 / M2 の枠に回る。
+    /// 1 回目は東西に分かれる (2 回目の対象は 東の R2 H2 M2 か 西の M1 H1 R1) 想定で、
+    ///   東 → タンク 10 時 / R2 1 時 / H2 4 時 / M2 7 時 (M2 が 2.5 時間分)、西 → タンク 1 時 / M1 4 時 / H1 7 時 / R1 10 時 (M1 が 2 時間分)。
     /// 出発点はタンク 北、優先順の i 番目 (0 始まり) = 北から 45° × (i + 1)、半径 SpreadRadius。点の半径は本番と同じ。
-    /// 同じ合計なら、一番動く人の距離が短い方 → 0 時に近い方 (各自の画面で同じ答えになるよう、決まった順で比べる)。
     /// </summary>
     /// <param name="lineIndex">2 回目の対象 3 人の、優先順の中の位置 (十字に置く順)。</param>
     private int BestRotation(int[] lineIndex, float hitbox)
@@ -614,29 +619,37 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         var rt = hitbox + C.TankReach;
         var rs = C.SpreadRadius;
         var best = 0;
-        var bestSum = float.MaxValue;
-        var bestMax = float.MaxValue;
+        var bestKey = new[] { float.MaxValue, float.MaxValue, float.MaxValue };
         var notes = new List<string>();
         for (var c = 0; c < 12; c++)
         {
-            var d = new float[4];
-            d[0] = Vector3.Distance(DirOf(0f) * rs, DirOf(c * 30f) * rt);
+            var sum = Vector3.Distance(DirOf(0f) * rs, DirOf(c * 30f) * rt);
+            var maxRh = 0f;
             for (var i = 0; i < 3; i++)
-                d[i + 1] = Vector3.Distance(DirOf(45f * (lineIndex[i] + 1)) * rs, DirOf((c + 3 * (i + 1)) % 12 * 30f) * rh);
-            var sum = d.Sum();
-            var max = d.Max();
-            notes.Add($"{c}時 {sum:F1}");
-            var same = MathF.Abs(sum - bestSum) <= 0.01f;
-            var better = sum < bestSum - 0.01f
-                         || same && max < bestMax - 0.01f
-                         || same && MathF.Abs(max - bestMax) <= 0.01f && Math.Min(c, 12 - c) < Math.Min(best, 12 - best);
-            if (!better) continue;
+            {
+                var d = Vector3.Distance(DirOf(45f * (lineIndex[i] + 1)) * rs, DirOf((c + 3 * (i + 1)) % 12 * 30f) * rh);
+                sum += d;
+                if (lineIndex[i] is not (2 or 3)) maxRh = MathF.Max(maxRh, d);   // M2 / M1 の枠は長く動いてよい
+            }
+            var key = new[] { maxRh, sum, Math.Min(c, 12 - c) };
+            notes.Add($"{c}時 {maxRh:F1}/{sum:F1}");
+            if (!IsBetter(key, bestKey)) continue;
             best = c;
-            bestSum = sum;
-            bestMax = max;
+            bestKey = key;
         }
-        _rotationNote = $"タンク {best} 時 (移動の合計 {bestSum:F1} / 最大 {bestMax:F1}) ← {string.Join(", ", notes)}";
+        _rotationNote = $"タンク {best} 時 (遠隔・ヒーラーの最大 {bestKey[0]:F1} / 合計 {bestKey[1]:F1}) ← 候補 (最大/合計): {string.Join(", ", notes)}";
         return best;
+    }
+
+    /// <summary>key を前から順に比べて小さい方。差が 0.01 以下は同じとみなす。</summary>
+    private static bool IsBetter(float[] key, float[] best)
+    {
+        for (var j = 0; j < key.Length; j++)
+        {
+            if (key[j] < best[j] - 0.01f) return true;
+            if (key[j] > best[j] + 0.01f) return false;
+        }
+        return false;
     }
 
     private void JudgeHoly2()
@@ -810,7 +823,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             [LayoutMode.Rotate] = "移動の少ない向き: 0〜11 時で十字を回す",
         });
         if (C.Layout == LayoutMode.Rotate)
-            ImGuiEx.TextWrapped("出発点を タンク 北、優先順の 1〜6 番目 = 北東 / 東 / 南東 / 南 / 南西 / 西 と仮定して、タンクと対象 3 人の移動の合計が一番少ない向きにする。全員が同じ優先順・同じロールの割り当てを使うこと (各自の画面で別々に計算する)");
+            ImGuiEx.TextWrapped("出発点を タンク 北、優先順の 1〜6 番目 = 北東 / 東 / 南東 / 南 / 南西 / 西 と仮定して十字を回す。遠隔・ヒーラーの移動を一番短くし、長く動くのは M2 / M1 (優先順の 3・4 番目) の枠に回す。例: 東 (R2 H2 M2) → タンク 10 時 / 1 時 / 4 時 / 7 時、西 (M1 H1 R1) → タンク 1 時 / 4 時 / 7 時 / 10 時。全員が同じ優先順・同じロールの割り当てを使うこと (各自の画面で別々に計算する)");
         ImGuiEx.TextWrapped("優先順 (非タンク 6 人)。上から見て、2 回目のホーリーの対象だけを拾った順に、十字のタンクの次から時計回り (Default なら 3 時 → 6 時 → 9 時)。ロール指定なら、各ロールが誰かは Edit Roles の割り当てで決まる");
         C.Priority.Draw();
     }
