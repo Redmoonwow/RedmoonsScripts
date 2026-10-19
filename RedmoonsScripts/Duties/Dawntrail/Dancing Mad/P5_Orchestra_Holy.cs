@@ -34,7 +34,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///       例: 優先順が 召喚 学者 リーパー … で、召喚が 1 回目を受けたら 学者 3 時 / リーパー 6 時 / …。距離はヒットボックス + HolyOffset
 ///   1 回目を受けた非タンク 3 人   南の外周 (ケフカから OuterRadius)
 ///   タンク 2 人                  北、ヒットボックス + TankReach (ぎりぎり殴れる位置)
-/// ケフカの位置とヒットボックスは毎フレーム実物から取る (ヒットボックスは計算式だと 1.5 × 3 = 4.5)。
+/// ケフカの位置とヒットボックスは毎フレーム実物から取る (実測 8.01。ModelSkeleton × Scale の計算式の 4.5 は外れ)。
+/// ケフカの円は大きく、クリアログの 2 回目の対象は円の内側 (4.5〜6.8) に立っている。タンクは近接の届く 8.01 + 3 まで下がれる。
 /// 8 人全員の担当を解いてから、自分の点だけを描く。
 ///
 /// 優先順が使えない / 2 回目の対象が 3 人にならないときは、2 回目の対象の点を出さない (履歴に理由を残す)。
@@ -125,15 +126,32 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /********************************************************************/
     public class Config
     {
+        // 既定は R2 → H2 → M2 → M1 → H1 → R1 (ロール指定。誰がどのロールかは Splatoon の Edit Roles で割り当てる)
         public PriorityData6 Priority = new()
         {
             Name = "P5 Orchestra Holy",
             Description = "非タンク 6 人。上から見て 2 回目のホーリーの対象だけを拾った順に 3 時 → 6 時 → 9 時",
+            PriorityLists =
+            [
+                new PriorityList
+                {
+                    IsRole = true,
+                    List =
+                    [
+                        new JobbedPlayer { Role = RolePosition.R2 },
+                        new JobbedPlayer { Role = RolePosition.H2 },
+                        new JobbedPlayer { Role = RolePosition.M2 },
+                        new JobbedPlayer { Role = RolePosition.M1 },
+                        new JobbedPlayer { Role = RolePosition.H1 },
+                        new JobbedPlayer { Role = RolePosition.R1 },
+                    ],
+                },
+            ],
         };
-        public float HolyOffset = 0.5f;       // 2 回目の対象の点: ヒットボックスの縁から外へ
+        public float HolyOffset = -0.5f;      // 2 回目の対象の点: ヒットボックスの縁から外へ (負なら内側)
         public float TankReach = 3.0f;        // タンクの点: ヒットボックスの縁から外へ (近接は縁から 3)
         public float OuterRadius = 19f;       // 1 回目を受けた人の点: ケフカから (フィールドは半径 20 と推定)
-        public float FallbackHitbox = 4.5f;   // ケフカが見つからないときのヒットボックス
+        public float FallbackHitbox = 8.01f;  // ケフカが見つからないときのヒットボックス (P5 ケフカ 19511 の実測)
         // 点の見た目 (半径・太さ・色など) は Splatoon の Registered elements の Edit で変える。スクリプトは書かない。
         // 例外はグラデーション (毎フレーム色を書く) と文字 (担当と秒を書く)。どちらも切れる
         public bool UseGradient = true;
@@ -178,7 +196,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(11, "Redmoon");
+    public override Metadata Metadata => new(12, "Redmoon");
     #endregion
 
     #region private properties
