@@ -60,11 +60,12 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///
 /// 設定画面: ユーザー向けは配置 (Layout) と優先順だけ。点の見た目は Splatoon の Registered elements の Edit で変える
 /// (スクリプトは位置・表示・文字と、グラデーションが ON のときの色しか書かない)。
-/// Debug 欄は 4 タブ:
+/// Debug 欄は 5 タブ:
 ///   設定   点の距離 (ホーリー・タンク・外周)、仮定の出発点の半径、時間切れ、グラデーション、文字、Verbose log、Debug 表示、今の余地
 ///   現在   状態、ケフカ、十字の向き、5 つの点の座標、8 人の表 (役・担当・1 回目の角度と距離・今の距離と近い順・2 回目・引かれる場所・判定結果)、
 ///          このトライの判定 (1 回目・2 回目のオーケストラ)。判定は毎回 dalamud.log にも出す
 ///   テスト 1 回目の対象を手で選んで、本物と同じ道で点を出す (今のターゲットをケフカの代わりにする)
+///   組み合わせ 2 回目の対象 3 人の 20 通りごとの割り振り (本番と同じ計算)。「流す」でその組み合わせの点を出す
 ///   履歴   判断ログ。VerboseLog が切れていても残す
 /// </remarks>
 internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Config>
@@ -213,7 +214,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(14, "Redmoon");
+    public override Metadata Metadata => new(15, "Redmoon");
     #endregion
 
     #region private properties
@@ -385,6 +386,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             ("設定", DrawConfigTab, null, false),
             ("現在", DrawNowTab, null, false),
             ("テスト", DrawTestTab, null, false),
+            ("組み合わせ", DrawComboTab, null, false),
             ("履歴", DrawHistoryTab, null, false));
     }
     #endregion
@@ -615,6 +617,13 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /// <param name="lineIndex">2 回目の対象 3 人の、優先順の中の位置 (十字に置く順)。</param>
     private int BestRotation(int[] lineIndex, float hitbox)
     {
+        var best = ComputeRotation(lineIndex, hitbox, out _rotationNote);
+        return best;
+    }
+
+    /// <summary>BestRotation の計算そのもの (状態を変えない)。組み合わせタブの表からも呼ぶ。</summary>
+    private int ComputeRotation(int[] lineIndex, float hitbox, out string note)
+    {
         var rh = hitbox + C.HolyOffset;
         var rt = hitbox + C.TankReach;
         var rs = C.SpreadRadius;
@@ -627,7 +636,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             var maxRh = 0f;
             for (var i = 0; i < 3; i++)
             {
-                var d = Vector3.Distance(DirOf(45f * (lineIndex[i] + 1)) * rs, DirOf((c + 3 * (i + 1)) % 12 * 30f) * rh);
+                var d = Vector3.Distance(DirOf(StartAngle(lineIndex[i])) * rs, DirOf((c + 3 * (i + 1)) % 12 * 30f) * rh);
                 sum += d;
                 if (lineIndex[i] is not (2 or 3)) maxRh = MathF.Max(maxRh, d);   // M2 / M1 の枠は長く動いてよい
             }
@@ -637,8 +646,18 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             best = c;
             bestKey = key;
         }
-        _rotationNote = $"タンク {best} 時 (遠隔・ヒーラーの最大 {bestKey[0]:F1} / 合計 {bestKey[1]:F1}) ← 候補 (最大/合計): {string.Join(", ", notes)}";
+        note = $"タンク {best} 時 (遠隔・ヒーラーの最大 {bestKey[0]:F1} / 合計 {bestKey[1]:F1}) ← 候補 (最大/合計): {string.Join(", ", notes)}";
         return best;
+    }
+
+    /// <summary>仮定の出発点 (8 方向散開) の角度。優先順の i 番目 (0 始まり) = 北から 45° × (i + 1)。タンクは 0°。</summary>
+    private static float StartAngle(int lineIndex) => 45f * (lineIndex + 1);
+
+    /// <summary>2 つの角度 (度) の差を時計の時間 (30° = 1 時間) で。</summary>
+    private static float ClockHours(float fromDeg, float toDeg)
+    {
+        var d = MathF.Abs(fromDeg - toDeg) % 360f;
+        return (d > 180f ? 360f - d : d) / 30f;
     }
 
     /// <summary>key を前から順に比べて小さい方。差が 0.01 以下は同じとみなす。</summary>
@@ -815,17 +834,22 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /// <summary>ユーザー向けは配置と優先順だけ。点の見た目は Registered elements の Edit、残りの調整は Debug の「設定」。</summary>
     private void DrawSettings()
     {
-        ImGuiEx.Text("配置 (タンクと 2 回目の対象 3 人の十字の向き)");
-        ImGui.SetNextItemWidth(360f);
-        ImGuiEx.EnumCombo("##Layout", ref C.Layout, new Dictionary<LayoutMode, string>
-        {
-            [LayoutMode.TankFixed] = "Default (タンク A 固定): タンク 0 時 / 3 時 / 6 時 / 9 時",
-            [LayoutMode.Rotate] = "移動の少ない向き: 0〜11 時で十字を回す",
-        });
+        DrawLayoutCombo("##Layout");
         if (C.Layout == LayoutMode.Rotate)
             ImGuiEx.TextWrapped("出発点を タンク 北、優先順の 1〜6 番目 = 北東 / 東 / 南東 / 南 / 南西 / 西 と仮定して十字を回す。遠隔・ヒーラーの移動を一番短くし、長く動くのは M2 / M1 (優先順の 3・4 番目) の枠に回す。例: 東 (R2 H2 M2) → タンク 10 時 / 1 時 / 4 時 / 7 時、西 (M1 H1 R1) → タンク 1 時 / 4 時 / 7 時 / 10 時。全員が同じ優先順・同じロールの割り当てを使うこと (各自の画面で別々に計算する)");
         ImGuiEx.TextWrapped("優先順 (非タンク 6 人)。上から見て、2 回目のホーリーの対象だけを拾った順に、十字のタンクの次から時計回り (Default なら 3 時 → 6 時 → 9 時)。ロール指定なら、各ロールが誰かは Edit Roles の割り当てで決まる");
         C.Priority.Draw();
+    }
+
+    private void DrawLayoutCombo(string id)
+    {
+        ImGuiEx.Text("配置 (タンクと 2 回目の対象 3 人の十字の向き)");
+        ImGui.SetNextItemWidth(360f);
+        ImGuiEx.EnumCombo(id, ref C.Layout, new Dictionary<LayoutMode, string>
+        {
+            [LayoutMode.TankFixed] = "Default (タンク A 固定): タンク 0 時 / 3 時 / 6 時 / 9 時",
+            [LayoutMode.Rotate] = "タンクも移動させて移動距離を均等化する: 0〜11 時で十字を回す",
+        });
     }
 
     // ---- Debug: 設定 ----------------------------------------------------------
@@ -981,6 +1005,83 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         }
         ImGui.SameLine();
         if (ImGui.Button("止める") && _state != State.None) Finish("テストを止めた");
+    }
+
+    // ---- Debug: 組み合わせ ----------------------------------------------------
+
+    /// <summary>
+    /// 2 回目の対象 3 人の組み合わせ (優先順の 6 人から 3 人 = 20 通り) ごとの割り振りを、本番と同じ計算 (ComputeRotation) で並べる。
+    /// 「流す」は、その 3 人が 2 回目の対象 (残りの非タンクが 1 回目を受けた) として、本物と同じ Resolve / ShowPoints で点を出す。
+    /// </summary>
+    private void DrawComboTab()
+    {
+        DrawLayoutCombo("##LayoutCombo");
+        var (_, hitbox) = Kefka();
+        var players = C.Priority.GetPlayers(_ => true);   // null = 優先順がパーティと合わない
+        var entries = C.Priority.PriorityLists.FirstOrDefault()?.List;
+        ImGuiEx.TextWrapped($"ヒットボックス {hitbox:F2}{(_kefkaId.GetObject() == null ? " (設定値)" : "")}。仮定の出発点はタンク 北、優先順の 1〜6 番目 = 北東 / 東 / 南東 / 南 / 南西 / 西。" +
+                            "括弧は仮定の位置から動く量 (時間分)、2 時間分以上は赤。「流す」は今のターゲットをケフカの代わりにする (無ければアリーナ中央と設定値)");
+        if (players is not { Count: 6 })
+            ImGuiEx.Text(ImGuiColors(false), "優先順がパーティと合わないので「流す」は使えない (表は優先順の枠の名前で計算する)");
+
+        string Label(int i)
+        {
+            var slot = entries == null || i >= entries.Count ? $"#{i + 1}"
+                : entries[i].Role != RolePosition.Not_Selected ? entries[i].Role.ToString() : entries[i].GetNameAndJob();
+            var name = players is { Count: 6 } ? players[i].Name.Split(' ')[0] : null;
+            return name == null ? slot : $"{name}({slot})";
+        }
+
+        List<ImGuiEx.EzTableEntry> rows = [];
+        var n = 0;
+        for (var a = 0; a < 6; a++)
+        for (var b = a + 1; b < 6; b++)
+        for (var c = b + 1; c < 6; c++)
+        {
+            var no = ++n;
+            var idx = new[] { a, b, c };
+            var rot = C.Layout == LayoutMode.Rotate ? ComputeRotation(idx, hitbox, out _) : 0;
+            var tag = a == 0 && b == 1 && c == 2 ? " 東" : a == 3 && b == 4 && c == 5 ? " 西" : "";
+            rows.Add(new("#", () => ImGuiEx.Text($"{no}{tag}")));
+            rows.Add(new("対象 3 人", () => ImGuiEx.Text(string.Join("・", idx.Select(Label)))));
+            rows.Add(new("タンク", () => DrawMove($"{rot}時", ClockHours(0f, rot * 30f))));
+            for (var i = 0; i < 3; i++)
+            {
+                var k = i;
+                var clock = (rot + 3 * (k + 1)) % 12;
+                rows.Add(new($"{k + 1}人目", () => DrawMove($"{Label(idx[k])} {clock}時", ClockHours(StartAngle(idx[k]), clock * 30f))));
+            }
+            rows.Add(new("テスト", () =>
+            {
+                ImGui.BeginDisabled(players is not { Count: 6 });
+                if (ImGui.SmallButton($"流す##combo{no}")) RunComboTest(idx, players!);
+                ImGui.EndDisabled();
+            }));
+        }
+        ImGuiEx.EzTable(rows);
+        ImGui.BeginDisabled(_state == State.None);
+        if (ImGui.Button("止める##combo")) Finish("組み合わせのテストを止めた");
+        ImGui.EndDisabled();
+    }
+
+    private static void DrawMove(string text, float hours)
+    {
+        var label = $"{text} ({hours:F1}h)";
+        if (hours >= 2f) ImGuiEx.Text(ImGuiColors(false), label);
+        else ImGuiEx.Text(label);
+    }
+
+    /// <summary>組み合わせの「流す」。holy2Index の 3 人を 2 回目の対象、残りの非タンクを 1 回目の中心にして、本番と同じ道で点を出す。</summary>
+    private void RunComboTest(int[] holy2Index, List<ECommons.PartyFunctions.UniversalPartyMember> players)
+    {
+        var target = ECommons.DalamudServices.Svc.Targets.Target;
+        Begin(target?.EntityId ?? 0, true);
+        var holy2 = holy2Index.Select(i => players[i].IGameObject?.EntityId ?? 0).ToHashSet();
+        foreach (var pc in _partyDataList) pc.Holy1Target = !pc.IsTank && !holy2.Contains(pc.EntityId);
+        _holy1Ms = Environment.TickCount64;
+        Log($"組み合わせのテスト: 2 回目の対象 {string.Join(", ", holy2Index.Select(i => players[i].Name))}");
+        Resolve();
+        _state = State.Guide;
     }
 
     // ---- Debug: 履歴 ----------------------------------------------------------
