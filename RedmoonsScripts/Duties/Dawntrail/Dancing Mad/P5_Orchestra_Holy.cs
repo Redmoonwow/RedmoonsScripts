@@ -47,7 +47,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// Debug 欄は 5 タブ:
 ///   設定   点の距離 (ホーリー・タンク・外周)、時間切れ、グラデーション、文字、Verbose log、Debug 表示、今の余地
 ///   現在   状態、ケフカ、点の座標、8 人の表 (役・担当・1 回目の角度と距離・今の距離と近い順)
-///   判定   2 回目のホーリーの答え合わせ。直近 10 回 (1 プルで 2 回来るので、プルの時刻と何回目かを付ける)
+///   判定   2 回目のホーリーの答え合わせ。このトライの分だけ (1 回目・2 回目のオーケストラ)。判定は毎回 dalamud.log にも出す
 ///   テスト 1 回目の対象を手で選んで、本物と同じ道で点を出す (今のターゲットをケフカの代わりにする)
 ///   履歴   判断ログ。VerboseLog が切れていても残す
 /// </remarks>
@@ -155,7 +155,6 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     private const long Holy2MinGapMs = 1500;     // 1 回目からこれより後のホーリーを 2 回目とみなす
     private const long ExpectedHoly2Ms = 3170;   // 1 回目 → 2 回目 (クリアログ 3.16〜3.17 秒、10/18 は 3.18 秒)
     private const int HistoryMax = 300;
-    private const int JudgeMax = 10;             // 判定を残す数 (1 プルで 2 回あるので 5 プル分)
     private static readonly Vector3 ArenaCenter = new(100f, 0f, 100f);
 
     private const string PointElement = "Point";
@@ -168,7 +167,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(4, "Redmoon");
+    public override Metadata Metadata => new(5, "Redmoon");
     #endregion
 
     #region private properties
@@ -185,7 +184,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     private string _assignNote = "";            // 割り振りの根拠 / 失敗理由
     private int _orchestraNo;                   // このプルで何回目のオーケストラか (1 プルで 2 回。テストは数えない)
     private string _pullTime = "-";             // このプルの戦闘開始の時刻
-    private readonly List<Judge> _judges = [];  // 古い順。JudgeMax まで
+    private readonly List<Judge> _judges = [];  // このトライの分だけ (古い順、ふつう 2 件)。戦闘開始で捨てる
     private readonly List<string> _history = [];
     private readonly HashSet<uint> _testHoly1 = [];
     #endregion
@@ -320,6 +319,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         _assignNote = "";
         _orchestraNo = 0;
         _pullTime = DateTime.Now.ToString("HH:mm:ss");
+        _judges.Clear();   // 判定はこのトライの分だけ。前のトライの分は dalamud.log にある
         Log("戦闘開始: 初期化");
     }
 
@@ -521,8 +521,10 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
                 : $"{mine.Role} {SlotText(mine.Slot)} / 着弾時の距離 {mine.Holy2Radius:F2} (点 {PointRadiusOf(mine.Slot, hitbox):F2}) / 当たり {mine.Holy2Hits}",
         };
         _judges.Add(judge);
-        if (_judges.Count > JudgeMax) _judges.RemoveRange(0, _judges.Count - JudgeMax);
-        Log($"判定 ({judge.Label}): 予定どおり={judge.PlannedMatch} 近い 3 人={judge.NearestMatch} / 中心 {judge.Targets} / 近い順 {judge.Nearest} / 自分 {judge.Mine}");
+        var line = $"判定 ({judge.Label}): 予定どおり={judge.PlannedMatch} 近い 3 人={judge.NearestMatch} / 中心 {judge.Targets} / 近い順 {judge.Nearest} / 自分 {judge.Mine}";
+        Log(line);
+        // 前のトライの判定はここにしか残らないので、VerboseLog に関係なく dalamud.log へ出す (1 回 1 行)
+        if (!C.VerboseLog) PluginLog.Information($"[P5OH] {line}");
     }
 
     // ---- 表示 -----------------------------------------------------------------
@@ -737,7 +739,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     // ---- Debug: 判定 ----------------------------------------------------------
 
-    /// <summary>直近 JudgeMax 回の判定。新しい順。1 プルで 2 回あるので、プルの時刻と何回目かを見出しにする。</summary>
+    /// <summary>このトライの判定 (1 回目・2 回目のオーケストラ)。新しい順。前のトライの分は dalamud.log に残っている。</summary>
     private void DrawJudgeTab()
     {
         if (_judges.Count == 0)
@@ -745,7 +747,6 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             ImGuiEx.Text("まだ 2 回目のホーリーを見ていない");
             return;
         }
-        if (ImGui.Button("消去")) _judges.Clear();
         for (var i = _judges.Count - 1; i >= 0; i--)
         {
             var j = _judges[i];
