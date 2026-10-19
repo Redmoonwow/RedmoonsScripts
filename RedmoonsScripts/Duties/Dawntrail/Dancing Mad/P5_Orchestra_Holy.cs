@@ -42,6 +42,14 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 2 回目のホーリーが来たら、実際に当たった人・その瞬間の距離・近い 3 人を記録して「判定」に残す。
 /// 仮説 (近い 3 人に飛ぶ) と予定 (割り振り) の両方と突き合わせる。
 ///
+/// 進行はゲームの出来事だけで決める (時間で決めない。リプレイの一時停止・スローでもずれない):
+///   開始       47952 の詠唱
+///   割り振り   1 回目のホーリーで非タンク 3 人が中心になった瞬間。そろわなければ ついでにフレア/ホーリー (5350/5351) が付いた時
+///   2 回目     47953 (オーケストラの 2 発目) の後のホーリー。47953 を取り損ねても、1 回目の中心でない人が中心なら 2 回目
+///   点を消す   2 回目のホーリーの 1 発目の ActionEffect
+///   判定・終了 2 回目の中心が 3 人そろった時。そろわなければ ついでに… が切れた時 / フレアディフュージョン 47957
+/// 時間を使うのは、点の文字の残り秒と、実機の保険 (SafetySeconds) だけ。
+///
 /// 設定画面: ユーザー向けは優先順だけ。点の見た目は Splatoon の Registered elements の Edit で変える
 /// (スクリプトは位置・表示・文字と、グラデーションが ON のときの色しか書かない)。
 /// Debug 欄は 5 タブ:
@@ -61,9 +69,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     {
         None = 0,
         WaitHoly1,     // 47952 の詠唱を見た。1 回目のホーリー待ち
-        CollectHoly1,  // 1 回目の 3 発をまとめている
+        CollectHoly1,  // 1 回目の中心が 3 人そろうか、ついでに… が付くのを待っている
         Guide,         // 点を出している。2 回目のホーリー待ち
-        CollectHoly2,  // 2 回目の着弾をまとめている (判定用)
+        CollectHoly2,  // 2 回目の中心が 3 人そろうか、ついでに… が切れる / ディフュージョンを待っている (判定用)
     }
 
     private enum Role { None = 0, Holy2, Holy1, Tank }
@@ -132,7 +140,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         public uint Color1 = 0xC8FFFF00;      // グラデーション (ABGR)。2 色を同じにすると単色
         public uint Color2 = 0xC8FF00FF;
         public bool ShowText = true;
-        public float TimeoutSeconds = 12f;    // 47952 からこれだけ経ったら畳む
+        public float SafetySeconds = 15f;     // 保険。ふつうはイベント (2 回目のホーリー / ついでに… が切れる / ディフュージョン) で終わる。実機だけ
         public bool VerboseLog;               // 判断を dalamud.log にも出す
         public bool DebugDraw;                // 全員の点・ホーリーの範囲・ヒットボックスを細く出す
     }
@@ -147,13 +155,16 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /********************************************************************/
     /* const                                                            */
     /********************************************************************/
-    private const uint OrchestraCast = 47952;   // 狂気のオーケストラ (詠唱 4.7 秒)
+    // 進行はすべてゲームの出来事で決める (時間で決めるのは、点の文字の残り秒と実機の保険だけ)
+    private const uint OrchestraCast = 47952;   // 狂気のオーケストラ (詠唱 4.7 秒) → 開始
+    private const uint OrchestraSecond = 47953; // 狂気のオーケストラの 2 発目 (2 回目のホーリーの約 0.9 秒前) → 次のホーリーは 2 回目
     private const uint HolyId = 47956;          // ホーリー
+    private const uint FlareDiffusion = 47957;  // フレアディフュージョン (2 回目の約 3.5 秒後) → 必ず畳む
+    private const ushort SurpriseFlare = 5350;  // ついでにフレア (1 回目の約 0.6 秒後に付き、6 秒で切れる)
+    private const ushort SurpriseHoly = 5351;   // ついでにホーリー (同上)
     private const float HolyRange = 5f;         // ホーリーの円 (Lumina の EffectRange)
     private const float PlayerHitbox = 0.5f;
-    private const long CollectMs = 300;          // 同じ回の着弾をまとめる時間
-    private const long Holy2MinGapMs = 1500;     // 1 回目からこれより後のホーリーを 2 回目とみなす
-    private const long ExpectedHoly2Ms = 3170;   // 1 回目 → 2 回目 (クリアログ 3.16〜3.17 秒、10/18 は 3.18 秒)
+    private const long ExpectedHoly2Ms = 3170;   // 1 回目 → 2 回目 (クリアログ 3.16〜3.17 秒、10/18 は 3.18 秒)。点の文字の残り秒だけに使う
     private const int HistoryMax = 300;
     private static readonly Vector3 ArenaCenter = new(100f, 0f, 100f);
 
@@ -167,7 +178,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(6, "Redmoon");
+    public override Metadata Metadata => new(7, "Redmoon");
     #endregion
 
     #region private properties
@@ -178,8 +189,8 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     private readonly List<PartyData> _partyDataList = [];
     private uint _kefkaId;
     private long _startMs;
-    private long _holy1Ms;
-    private long _holy2Ms;
+    private long _holy1Ms;                      // 1 回目のホーリーの時刻。点の文字の残り秒だけに使う
+    private bool _orchestra2Seen;               // 47953 を見た。次のホーリーは 2 回目
     private bool _test;
     private string _assignNote = "";            // 割り振りの根拠 / 失敗理由
     private int _orchestraNo;                   // このプルで何回目のオーケストラか (1 プルで 2 回。テストは数えない)
@@ -243,63 +254,58 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     public override void OnActionEffectEvent(ActionEffectSet set)
     {
-        if (set.Action?.RowId != HolyId || _state == State.None || _test) return;
-        var now = Environment.TickCount64;
-        switch (_state)
+        if (_state == State.None || _test || set.Action is not { } action) return;
+        switch (action.RowId)
         {
-            case State.WaitHoly1:
-                _holy1Ms = now;
-                _state = State.CollectHoly1;
-                RecordHoly1(set);
-                ResolveIfHoly1Complete();
+            case HolyId:
+                OnHoly(set);
                 break;
-            case State.CollectHoly1:
-                RecordHoly1(set);
-                ResolveIfHoly1Complete();
+            case OrchestraSecond:
+                _orchestra2Seen = true;
+                Log("47953 (オーケストラの 2 発目): 次のホーリーを 2 回目とみなす");
                 break;
-            case State.Guide when now - _holy1Ms < Holy2MinGapMs:
-                // 1 回目の 3 発がそろった後に来た遅い 1 発。割り振りは済んでいるので記録だけ
-                RecordHoly1(set);
-                Log("1 回目のホーリーが割り振りの後に来た (無視)");
-                break;
-            case State.Guide:
-                _holy2Ms = now;
-                SnapshotHoly2Radius();
-                _state = State.CollectHoly2;
-                HidePoints();   // 判定はもう済んだので、消す
-                RecordHoly2(set);
-                break;
-            case State.CollectHoly2:
-                RecordHoly2(set);
+            case FlareDiffusion:
+                // 2 回目の約 3.5 秒後。ここまで来たら必ず畳む
+                if (_state == State.CollectHoly2) JudgeHoly2();
+                Finish(_state == State.CollectHoly2 ? "フレアディフュージョン" : "フレアディフュージョン (2 回目のホーリーを取り損ねた)");
                 break;
         }
+    }
+
+    /// <summary>ついでにフレア / ホーリーが付いた = 1 回目の着弾は終わっている。3 発そろわなくても (誰かが死んでいる) 割り振る。</summary>
+    public override void OnGainBuffEffect(uint sourceId, FFXIVClientStructs.FFXIV.Client.Game.Status status)
+    {
+        if (_test || _state != State.CollectHoly1 || status.StatusId is not (SurpriseFlare or SurpriseHoly)) return;
+        Log($"ついでに… が付いた時点で 1 回目の中心が {_partyDataList.Count(x => x.Holy1Target && !x.IsTank)} 人。そのまま割り振る");
+        Resolve();
+        _state = State.Guide;
+    }
+
+    /// <summary>ついでにフレア / ホーリーが切れた = 2 回目の着弾は終わっている (約 2.8 秒後)。</summary>
+    public override void OnRemoveBuffEffect(uint sourceId, FFXIVClientStructs.FFXIV.Client.Game.Status status)
+    {
+        if (_test || status.StatusId is not (SurpriseFlare or SurpriseHoly)) return;
+        if (_state == State.CollectHoly2)
+        {
+            JudgeHoly2();
+            Finish("ついでに… が切れた");
+        }
+        else if (_state is State.Guide or State.CollectHoly1)
+            Finish("ついでに… が切れた (2 回目のホーリーを取り損ねた)");
     }
 
     public override void OnUpdate()
     {
         if (_state == State.None) return;
         var now = Environment.TickCount64;
-        // 時間切れは実時間で数える。リプレイは一時停止・スロー・シークで実時間と合わないので、時間切れにしない
-        // (シークでは Splatoon が OnReset を呼ぶので、そこで畳まれる)
-        if (!Replay && now - _startMs > C.TimeoutSeconds * 1000f)
+        // 保険。進行はイベントで決めるので、ふつうはここに来ない。実時間なのでリプレイでは使わない
+        // (一時停止・スロー・シークで実時間と合わない。シークでは Splatoon が OnReset を呼ぶので、そこで畳まれる)
+        if (!Replay && now - _startMs > C.SafetySeconds * 1000f)
         {
-            Finish("時間切れ");
+            Finish("保険の時間切れ (イベントを取り損ねた)");
             return;
         }
         UpdateLive();
-        if (_state == State.CollectHoly1 && now - _holy1Ms >= CollectMs)
-        {
-            // 3 発そろわないまま時間が過ぎた (誰かが死んでいるなど)。あるもので割り振る
-            Log($"1 回目のホーリーが {CollectMs}ms で {_partyDataList.Count(x => x.Holy1Target)} 発。そのまま割り振る");
-            Resolve();
-            _state = State.Guide;
-        }
-        if (_state == State.CollectHoly2 && now - _holy2Ms >= CollectMs)
-        {
-            JudgeHoly2();
-            Finish("2 回目のホーリー");
-            return;
-        }
         if (_state == State.Guide) ShowPoints(now);
     }
 
@@ -317,7 +323,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         _kefkaId = 0;
         _startMs = 0;
         _holy1Ms = 0;
-        _holy2Ms = 0;
+        _orchestra2Seen = false;
         _assignNote = "";
         _orchestraNo = 0;
         _pullTime = DateTime.Now.ToString("HH:mm:ss");
@@ -360,7 +366,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         _kefkaId = kefkaId;
         _startMs = Environment.TickCount64;
         _holy1Ms = 0;
-        _holy2Ms = 0;
+        _orchestra2Seen = false;
         _test = test;
         _assignNote = "";
         if (!test) _orchestraNo++;
@@ -428,12 +434,63 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         return hits.Count > 0 ? (hits[0], $"着弾位置に一番近い当たり / AnimationTarget={set.Target?.Name}") : (null, $"AnimationTarget={set.Target?.Name}");
     }
 
-    /// <summary>非タンク 3 人が 1 回目の中心になった時点で、300ms を待たずに割り振る (動ける時間を削らない)。</summary>
+    /// <summary>ホーリー 1 発 (1 パケット = 1 発)。1 回目か 2 回目かは状態と IsHoly2 で決める。</summary>
+    private void OnHoly(ActionEffectSet set)
+    {
+        switch (_state)
+        {
+            case State.WaitHoly1:
+                _holy1Ms = Environment.TickCount64;   // 点の文字の残り秒だけに使う
+                _state = State.CollectHoly1;
+                RecordHoly1(set);
+                ResolveIfHoly1Complete();
+                break;
+            case State.CollectHoly1:
+                RecordHoly1(set);
+                ResolveIfHoly1Complete();
+                break;
+            case State.Guide when !IsHoly2(set):
+                // 割り振った後に来た 1 回目の 1 発 (ついでに… で見切って割り振った後など)。割り振りはそのまま
+                RecordHoly1(set);
+                Log("1 回目のホーリーが割り振りの後に来た (割り振りはそのまま)");
+                break;
+            case State.Guide:
+                SnapshotHoly2Radius();
+                _state = State.CollectHoly2;
+                HidePoints();   // この瞬間に当たりが決まっている。点はここで消す
+                RecordHoly2(set);
+                JudgeIfHoly2Complete();
+                break;
+            case State.CollectHoly2:
+                RecordHoly2(set);
+                JudgeIfHoly2Complete();
+                break;
+        }
+    }
+
+    /// <summary>非タンク 3 人が 1 回目の中心になった時点で割り振る (待たない。動ける時間を削らない)。</summary>
+    /// <remarks>3 人にならない (誰かが死んでいる) ときは、ついでに… が付いた時 (OnGainBuffEffect) に割り振る。</remarks>
     private void ResolveIfHoly1Complete()
     {
         if (_partyDataList.Count(x => x.Holy1Target && !x.IsTank) < 3) return;
         Resolve();
         _state = State.Guide;
+    }
+
+    /// <summary>割り振りの後のホーリーが 2 回目か。47953 を見ていれば 2 回目。見ていなくても、中心が 1 回目の中心でなければ 2 回目。</summary>
+    private bool IsHoly2(ActionEffectSet set)
+    {
+        if (_orchestra2Seen) return true;
+        var (center, _) = CenterOf(set);
+        return center != null && !center.Holy1Target;
+    }
+
+    /// <summary>2 回目の中心が 3 人そろったら判定して畳む。そろわなければ ついでに… が切れた時 / ディフュージョンで判定する。</summary>
+    private void JudgeIfHoly2Complete()
+    {
+        if (_partyDataList.Count(x => x.Holy2Target) < 3) return;
+        JudgeHoly2();
+        Finish("2 回目のホーリー");
     }
 
     private void SnapshotHoly2Radius()
@@ -674,7 +731,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         }
         ImGui.Checkbox("文字を出す (担当と 2 回目までの秒)", ref C.ShowText);
         ImGui.SetNextItemWidth(150f);
-        ImGui.DragFloat("時間切れ (秒)", ref C.TimeoutSeconds, 0.5f, 5f, 30f, "%.1f");
+        ImGui.DragFloat("保険の時間切れ (秒、実機だけ。ふつうはイベントで終わる)", ref C.SafetySeconds, 0.5f, 10f, 30f, "%.1f");
         ImGui.Checkbox("Verbose log (dalamud.log にも出す)", ref C.VerboseLog);
         ImGui.Checkbox("Debug 表示 (全員の点・ホーリーの範囲 5.5・ヒットボックス)", ref C.DebugDraw);
 
