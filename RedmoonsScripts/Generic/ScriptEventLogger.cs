@@ -18,7 +18,7 @@ namespace RedmoonsScripts.Generic;
 internal unsafe class ScriptEventLogger :SplatoonScript
 {
     public override HashSet<uint>? ValidTerritories { get; } = null;
-    public override Metadata? Metadata => new(8, "Redmoon");
+    public override Metadata Metadata => new(9, "Redmoon");
 
     private Config Conf => Controller.GetConfig<Config>();
 
@@ -75,10 +75,10 @@ internal unsafe class ScriptEventLogger :SplatoonScript
         if (!Conf.FilterOnObjectEffect)
             return;
         var targetObj = target.GetObject();
-        if (targetObj == null || targetObj.DataId == 0)
+        if (targetObj == null || targetObj.BaseId == 0)
             return;
 
-        PluginLog.Information($"OnObjectEffect: {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.DataId}) - {entityId} - {actionId}");
+        PluginLog.Information($"OnObjectEffect: {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.BaseId}) - {entityId} - {actionId}");
     }
 
     public override void OnTetherCreate(uint source, uint target, uint data2, uint data3, uint data5)
@@ -91,18 +91,18 @@ internal unsafe class ScriptEventLogger :SplatoonScript
         if (sourceObj != null && targetObj != null)
         {
             PluginLog.Information($"OnTetherCreate: - {data2} - {data3} - {data5}");
-            PluginLog.Information($"    Source: {sourceObj.Name}{sourceObj.Position}(GID: {sourceObj.GameObjectId} DID: {sourceObj.DataId})");
-            PluginLog.Information($"    Target: {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.DataId})");
+            PluginLog.Information($"    Source: {sourceObj.Name}{sourceObj.Position}(GID: {sourceObj.GameObjectId} DID: {sourceObj.BaseId})");
+            PluginLog.Information($"    Target: {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.BaseId})");
         }
         else if (sourceObj != null && targetObj == null)
         {
             PluginLog.Information($"OnTetherCreate: - {data2} - {data3} - {data5}");
-            PluginLog.Information($"    Source: {sourceObj.Name}{sourceObj.Position}(GID: {sourceObj.GameObjectId} DID: {sourceObj.DataId})");
+            PluginLog.Information($"    Source: {sourceObj.Name}{sourceObj.Position}(GID: {sourceObj.GameObjectId} DID: {sourceObj.BaseId})");
         }
         else if (sourceObj == null && targetObj != null)
         {
             PluginLog.Information($"OnTetherCreate: - {data2} - {data3} - {data5}");
-            PluginLog.Information($"    Target: {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.DataId})");
+            PluginLog.Information($"    Target: {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.BaseId})");
         }
         else
         {
@@ -124,7 +124,7 @@ internal unsafe class ScriptEventLogger :SplatoonScript
         else
         {
             PluginLog.Information($"OnTetherRemoval: - {data2} - {data3} - {data5}");
-            PluginLog.Information($"    Source: {sourceObj.Name}{sourceObj.Position}(GID: {sourceObj.GameObjectId} DID: {sourceObj.DataId})");
+            PluginLog.Information($"    Source: {sourceObj.Name}{sourceObj.Position}(GID: {sourceObj.GameObjectId} DID: {sourceObj.BaseId})");
         }
     }
     public override void OnVFXSpawn(uint target, string vfxPath)
@@ -143,7 +143,7 @@ internal unsafe class ScriptEventLogger :SplatoonScript
         if (targetObj == null)
             PluginLog.Information($"OnVFXSpawn: {vfxPath}");
         else
-            PluginLog.Information($"OnVFXSpawn: {vfxPath} - {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.DataId})");
+            PluginLog.Information($"OnVFXSpawn: {vfxPath} - {targetObj.Name}{targetObj.Position}(GID: {targetObj.GameObjectId} DID: {targetObj.BaseId})");
     }
 
     public override void OnStartingCast(uint source, uint castId)
@@ -153,17 +153,17 @@ internal unsafe class ScriptEventLogger :SplatoonScript
             npc.BattleNpcKind == BattleNpcSubKind.Pet ||
             npc.BattleNpcKind == BattleNpcSubKind.None ||
             npc.BattleNpcKind == BattleNpcSubKind.RaceChocobo) return;
-        if (npc == null || npc.DataId == 0) return;
+        if (npc == null || npc.BaseId == 0) return;
 
         var action = Svc.Data.GetExcelSheet<Action>()!.GetRowOrDefault(castId);
 
         if (action.HasValue)
         {
-            PluginLog.Information($"OnStartingCast: Cast: {action.Value.Name}({castId}) - source: {npc.Name}{npc.Position}(GID: 0x{npc.GameObjectId.ToString("X8")} DID: {npc.DataId})");
+            PluginLog.Information($"OnStartingCast: Cast: {action.Value.Name}({castId}) - source: {npc.Name}{npc.Position}(GID: 0x{npc.GameObjectId.ToString("X8")} DID: {npc.BaseId})");
         }
         else
         {
-            PluginLog.Information($"OnStartingCast: Cast: {castId} - source: {npc.Name}{npc.Position}(GID: 0x{npc.GameObjectId.ToString("X8")} DID: {npc.DataId})");
+            PluginLog.Information($"OnStartingCast: Cast: {castId} - source: {npc.Name}{npc.Position}(GID: 0x{npc.GameObjectId.ToString("X8")} DID: {npc.BaseId})");
         }
     }
 
@@ -207,7 +207,7 @@ internal unsafe class ScriptEventLogger :SplatoonScript
                 {
                     PluginLog.Information(
                         $"OnObjectCreation: {gameObject.Name.ToString()}({gameObject.Position})" +
-                        $"(GID: 0x{gameObject.EntityId.ToString("X8")} DID: {gameObject.DataId.ToString("X8")})");
+                        $"(GID: 0x{gameObject.EntityId.ToString("X8")} DID: {gameObject.BaseId.ToString("X8")})");
                 }
             }
             );
@@ -223,7 +223,7 @@ internal unsafe class ScriptEventLogger :SplatoonScript
     public override void OnActionEffectEvent(ActionEffectSet set)
     {
         if (!Conf.FilterOnActionEffectEvent) return;
-        if (set.Action == null || set.Source == null || set.Source.DataId == 0) return;
+        if (set.Action == null || set.Source == null || set.Source.BaseId == 0) return;
 
         if (set.Source is not IBattleNpc npc ||
             npc.BattleNpcKind == BattleNpcSubKind.Pet ||
@@ -235,14 +235,14 @@ internal unsafe class ScriptEventLogger :SplatoonScript
                 $"OnActionEffectEvent: " +
                 $"{set.Action.Value.Name}({set.Action.Value.RowId}) - " +
                 $"Source: {set.Source.Name}{set.Source.Position}" +
-                $"(GID: 0x{set.Source.GameObjectId.ToString("X8")} DID: {set.Source.DataId.ToString("X8")})");
+                $"(GID: 0x{set.Source.GameObjectId.ToString("X8")} DID: {set.Source.BaseId.ToString("X8")})");
         else
             PluginLog.Information(
                 $"OnActionEffectEvent: {set.Action.Value.Name}({set.Action.Value.RowId}) - " +
                 $"Source: {set.Source.Name}{set.Source.Position}" +
-                $"(GID: 0x{set.Source.GameObjectId.ToString("X8")} DID: {set.Source.DataId.ToString("X8")}) - " +
+                $"(GID: 0x{set.Source.GameObjectId.ToString("X8")} DID: {set.Source.BaseId.ToString("X8")}) - " +
                 $"Target: {set.Target.Name}{set.Target.Position}" +
-                $"(GID: 0x{set.Target.GameObjectId.ToString("X8")} DID: {set.Target.DataId.ToString("X8")})");
+                $"(GID: 0x{set.Target.GameObjectId.ToString("X8")} DID: {set.Target.BaseId.ToString("X8")})");
     }
 
     public override void OnGainBuffEffect(uint sourceId, Status Status)
@@ -356,7 +356,7 @@ internal unsafe class ScriptEventLogger :SplatoonScript
     }
 
 
-    public class Config :IEzConfig
+    public class Config
     {
         public bool FilterOnSetup = false;
         public bool FilterOnEnable = false;

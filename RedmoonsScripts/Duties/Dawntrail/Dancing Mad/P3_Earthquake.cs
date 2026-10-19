@@ -51,6 +51,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v59 マーカー消去を戦闘開始とギミック終了だけにする (OnReset では撃たない)
 ///                                                       -> OnCombatStart
 ///   v60 マーカー消去は現状を確認せず無条件に撃つ -> Complete
+///   v61 旧形式の API を置き換える (FakePronoun -> ExtendedPronoun)。振る舞いは同じ
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///
 /// 上流には region が無く、185 メソッド・呼び出し 12 段のため上から下に読めない。
@@ -307,7 +308,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
     /********************************************************************/
     // スクリプトの識別情報。ValidTerritories と Metadata のみ。
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(60, "Garume, Redmoon");
+    public override Metadata Metadata => new(61, "Garume, Redmoon");
 
     #endregion
 
@@ -1047,7 +1048,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
         var self = BasePlayer?.EntityId ?? 0;
         for (var i = 1; i <= 8; i++)
         {
-            var resolved = FakePronoun.Resolve($"<{i}>");
+            var resolved = ExtendedPronoun.Resolve($"<{i}>");
             if (resolved == null)
             {
                 ImGui.TextUnformatted($"<{i}> = none");
@@ -1836,7 +1837,7 @@ public unsafe class P3_Earthquake : SplatoonScript<P3_Earthquake.Config>
             var tag = -1;
             for (var i = 1; i <= 8; i++)
             {
-                var obj = FakePronoun.Resolve($"<{i}>");
+                var obj = ExtendedPronoun.Resolve($"<{i}>");
                 if (obj != null && obj->EntityId == entry.EntityId)
                 {
                     tag = i;

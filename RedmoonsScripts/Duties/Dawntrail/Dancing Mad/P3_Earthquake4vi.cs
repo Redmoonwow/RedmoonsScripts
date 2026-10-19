@@ -57,6 +57,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v59 マーカー消去を戦闘開始とギミック終了だけにする (OnReset では撃たない)
 ///                                                       -> OnCombatStart
 ///   v60 マーカー消去は現状を確認せず無条件に撃つ -> Complete
+///   v61 旧形式の API を置き換える (DataId -> BaseId、FakePronoun -> ExtendedPronoun)。振る舞いは同じ
 ///   v48 詠唱通知の 2 経路目 (メモリ監視) を捨て、向きはパケット値だけを使う -> HandleStartingCast
 ///   v45 誘導とテザーの線を太くする (Garume 本人の v42 と同じ変更)
 ///
@@ -329,7 +330,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     private string _instruction = "";
 
     public override HashSet<uint>? ValidTerritories { get; } = [TerritoryDancingMadUltimate];
-    public override Metadata Metadata => new(60, "Garume, Redmoon");
+    public override Metadata Metadata => new(61, "Garume, Redmoon");
 
     public override void OnSetup()
     {
@@ -948,7 +949,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         var self = BasePlayer?.EntityId ?? 0;
         for (var i = 1; i <= 8; i++)
         {
-            var resolved = FakePronoun.Resolve($"<{i}>");
+            var resolved = ExtendedPronoun.Resolve($"<{i}>");
             if (resolved == null)
             {
                 ImGui.TextUnformatted($"<{i}> = none");
@@ -1322,7 +1323,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     {
         _blackHolePositions.Clear();
         foreach (var obj in Svc.Objects)
-            if (obj is ICharacter character && character.DataId == BlackHoleDataId)
+            if (obj is ICharacter character && character.BaseId == BlackHoleDataId)
                 _blackHolePositions.Add(FlatPosition(character.Position));
     }
 
@@ -1508,7 +1509,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     {
         for (var i = 1; i <= 8; i++)
         {
-            var obj = FakePronoun.Resolve($"<{i}>");
+            var obj = ExtendedPronoun.Resolve($"<{i}>");
             if (obj != null && obj->EntityId == entityId)
                 return i;
         }
@@ -2185,7 +2186,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         Vector2.Distance(new Vector2(position.X, position.Z), new Vector2(Center.X, Center.Z)) >= KefkaAnchorRadiusMin;
 
     private static bool IsKefkaAnchorObject(IGameObject obj) =>
-        obj.DataId == KefkaDataId && IsKefkaAnchorPosition(FlatPosition(obj.Position));
+        obj.BaseId == KefkaDataId && IsKefkaAnchorPosition(FlatPosition(obj.Position));
 
     private static bool TryGetKefkaAnchorOffset(uint actionId, out float offset)
     {
@@ -2971,7 +2972,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
         var entries = new List<string>();
         foreach (var obj in Svc.Objects)
         {
-            if (obj is not ICharacter character || obj.DataId != BlackHoleDataId)
+            if (obj is not ICharacter character || obj.BaseId != BlackHoleDataId)
                 continue;
             var hasBucket = TryBucket(obj.Position, out var bucket);
             entries.Add($"{DirectionName(hasBucket ? bucket : -1)}:{obj.EntityId:X8}@({obj.Position.X:F1},{obj.Position.Z:F1}) in={hasBucket} tethers=[{DescribeTethers(character)}]");
@@ -2989,7 +2990,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
             var tethers = DescribeTethers(character);
             if (tethers == "none")
                 continue;
-            entries.Add($"{obj.Name}(0x{obj.EntityId:X8}) data={obj.DataId} tethers=[{tethers}]");
+            entries.Add($"{obj.Name}(0x{obj.EntityId:X8}) data={obj.BaseId} tethers=[{tethers}]");
         }
         return entries.Count == 0 ? "none" : string.Join(" | ", entries.Take(16));
     }
@@ -3010,7 +3011,7 @@ public unsafe class P3_Earthquake4vi : SplatoonScript<P3_Earthquake4vi.Config>
     }
 
     private static bool IsBlackHoleObject(IGameObject obj) =>
-        obj.DataId == BlackHoleDataId && TryBucket(obj.Position, out _);
+        obj.BaseId == BlackHoleDataId && TryBucket(obj.Position, out _);
 
     private static bool DrawCombo(string label, ref int selected, string[] items, float width)
     {

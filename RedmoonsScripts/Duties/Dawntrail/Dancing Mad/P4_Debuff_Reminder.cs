@@ -53,6 +53,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   v16 ドーナツ/範囲の予告秒数スライダが視線の秒数を書き換えていたのを直す
 ///   v16 "Print final positions" のチェックを外しても出ていたのを直す
 ///   v16 100 行超の 3 関数を分割し、1 か所でしか使わない定数を直書きにする
+///   v17 旧形式の DataId を BaseId に、エレメントと VFX の取得に null の確認を足す
 /// </remarks>
 public class P4_Debuff_Reminder : SplatoonScript<P4_Debuff_Reminder.Config>
 {
@@ -112,12 +113,12 @@ public class P4_Debuff_Reminder : SplatoonScript<P4_Debuff_Reminder.Config>
     /* properties                                                       */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata { get; } = new(16, "NightmareXIV, mirage, Redmoon");
+    public override Metadata Metadata { get; } = new(17, "NightmareXIV, mirage, Redmoon");
 
     /// <summary>ケフカ本体が居て殴れる = このフェーズの最中。</summary>
     /// <remarks>フェーズ外でデバフを拾うと、別ギミックのスタックを誤って記録してしまう。
     /// 表示と記録の両方をこれ 1 つで塞いでいる。</remarks>
-    private bool PhaseActive => Svc.Objects.Any(x => x.DataId == 18475 && x.IsTargetable);
+    private bool PhaseActive => Svc.Objects.Any(x => x.BaseId == 18475 && x.IsTargetable);
 
     #endregion
 
@@ -204,7 +205,7 @@ public class P4_Debuff_Reminder : SplatoonScript<P4_Debuff_Reminder.Config>
     {
         // 19510 / 19507 = 正直と嘘つきの分身。片方だけが正しい技を撃つ。
         // どちらの ID がどちらとは決まっておらず、湧いたときのエフェクトでしか区別できない。
-        if(target.GetObject()?.DataId.EqualsAny<uint>(19510, 19507) != true) return;
+        if(target.GetObject()?.BaseId.EqualsAny<uint>(19510, 19507) != true) return;
 
         if(vfxPath is "vfx/common/eff/z3oy_stlp7_c0c.avfx" or "vfx/common/eff/z3oy_stlp5_c0c.avfx")
             _isTruth[target] = true;
@@ -300,14 +301,16 @@ public class P4_Debuff_Reminder : SplatoonScript<P4_Debuff_Reminder.Config>
             if(!member.HasStatus(Debuff.LookAway, out var times, lessThan: C.LookDontlookTH)) continue;
 
             var inverted = IsFake(member.ObjectId, Debuff.LookAway);
-            var gaze = Controller.GetElementByName(inverted ? "LookAt" : "LookAway");
-            gaze.Enabled = true;
-            gaze.overlayText = Text(inverted ? "LookAt" : "LookAway", times.SafeSelect(0).Time);
-            Controller.GetElementByName("EyeScope").Enabled = true;
+            if(Controller.TryGetElementByName(inverted ? "LookAt" : "LookAway", out var gaze))
+            {
+                gaze.Enabled = true;
+                gaze.overlayText = Text(inverted ? "LookAt" : "LookAway", times.SafeSelect(0).Time);
+            }
+            if(Controller.TryGetElementByName("EyeScope", out var scope)) scope.Enabled = true;
 
             if(!member.AddressEquals(BasePlayer)) continue;
 
-            var middle = Controller.GetElementByName("MiddleGaze");
+            if(!Controller.TryGetElementByName("MiddleGaze", out var middle)) continue;
             middle.Enabled = true;
             middle.color = Controller.AttentionColor;
             // 円の中に入ったら線を消す。着いたことが一目で分かるように。
@@ -410,7 +413,7 @@ public class P4_Debuff_Reminder : SplatoonScript<P4_Debuff_Reminder.Config>
     {
         if(Controller.GetPartyMembers().Any(x => x.HasStatus(Debuff.LookAway, 6.5f))) return;
 
-        var element = Controller.GetElementByName("MiddleDrop");
+        if(!Controller.TryGetElementByName("MiddleDrop", out var element)) return;
         element.Enabled = true;
         element.color = Controller.AttentionColor;
         element.overlayText = text;
@@ -601,8 +604,8 @@ public class P4_Debuff_Reminder : SplatoonScript<P4_Debuff_Reminder.Config>
         // 詠唱開始から 1 秒待つのは、ロックオンのエフェクトが本体に付くのがそのあとだから。
         if(!npcs.Any(x => x.IsCasting(47781) && x.CurrentCastTime > 1)) return;
 
-        var kefka = npcs.First(x => x.DataId == 18475 && x.IsTargetable);
-        if(!AttachedInfo.TryGetVfx(kefka, out var vfx)) return;
+        var kefka = npcs.First(x => x.BaseId == 18475 && x.IsTargetable);
+        if(!AttachedInfo.TryGetVfx(kefka, out var vfx) || vfx == null) return;
 
         _falseAnnounced = true;
         var lockOns = vfx.Where(x => x.Key.Contains("/lockon/")).OrderBy(x => x.Value.AgeF).Take(2);
