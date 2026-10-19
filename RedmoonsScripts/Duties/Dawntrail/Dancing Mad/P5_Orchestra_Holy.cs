@@ -47,7 +47,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// Debug 欄は 5 タブ:
 ///   設定   点の距離 (ホーリー・タンク・外周)、時間切れ、グラデーション、文字、Verbose log、Debug 表示、今の余地
 ///   現在   状態、ケフカ、点の座標、8 人の表 (役・担当・1 回目の角度と距離・今の距離と近い順)
-///   判定   直近の 2 回目のホーリーの答え合わせ
+///   判定   2 回目のホーリーの答え合わせ。直近 10 回 (1 プルで 2 回来るので、プルの時刻と何回目かを付ける)
 ///   テスト 1 回目の対象を手で選んで、本物と同じ道で点を出す (今のターゲットをケフカの代わりにする)
 ///   履歴   判断ログ。VerboseLog が切れていても残す
 /// </remarks>
@@ -99,6 +99,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     private sealed class Judge
     {
+        public string Label = "";         // 「プル 23:46 / 2 回目のオーケストラ」
         public string Time = "";
         public string Planned = "";       // 割り振りでの 2 回目の対象
         public string Targets = "";       // 実際にホーリーの中心にされた人
@@ -154,6 +155,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     private const long Holy2MinGapMs = 1500;     // 1 回目からこれより後のホーリーを 2 回目とみなす
     private const long ExpectedHoly2Ms = 3170;   // 1 回目 → 2 回目 (クリアログ 3.16〜3.17 秒、10/18 は 3.18 秒)
     private const int HistoryMax = 300;
+    private const int JudgeMax = 10;             // 判定を残す数 (1 プルで 2 回あるので 5 プル分)
     private static readonly Vector3 ArenaCenter = new(100f, 0f, 100f);
 
     private const string PointElement = "Point";
@@ -166,7 +168,7 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(3, "Redmoon");
+    public override Metadata Metadata => new(4, "Redmoon");
     #endregion
 
     #region private properties
@@ -181,7 +183,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
     private long _holy2Ms;
     private bool _test;
     private string _assignNote = "";            // 割り振りの根拠 / 失敗理由
-    private Judge? _lastJudge;
+    private int _orchestraNo;                   // このプルで何回目のオーケストラか (1 プルで 2 回。テストは数えない)
+    private string _pullTime = "-";             // このプルの戦闘開始の時刻
+    private readonly List<Judge> _judges = [];  // 古い順。JudgeMax まで
     private readonly List<string> _history = [];
     private readonly HashSet<uint> _testHoly1 = [];
     #endregion
@@ -314,6 +318,8 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         _holy1Ms = 0;
         _holy2Ms = 0;
         _assignNote = "";
+        _orchestraNo = 0;
+        _pullTime = DateTime.Now.ToString("HH:mm:ss");
         Log("戦闘開始: 初期化");
     }
 
@@ -355,9 +361,10 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         _holy2Ms = 0;
         _test = test;
         _assignNote = "";
+        if (!test) _orchestraNo++;
         BuildParty();
         _state = State.WaitHoly1;
-        Log($"開始{(test ? " (テスト)" : "")}: ケフカ {NameOf(kefkaId)} 0x{kefkaId:X8} / パーティ {_partyDataList.Count} 人 / 自分 {_partyDataList.Find(x => x.Mine)?.Name ?? "居ない"}");
+        Log($"開始{(test ? " (テスト)" : $" ({_orchestraNo} 回目のオーケストラ)")}: ケフカ {NameOf(kefkaId)} 0x{kefkaId:X8} / パーティ {_partyDataList.Count} 人 / 自分 {_partyDataList.Find(x => x.Mine)?.Name ?? "居ない"}");
     }
 
     private void Finish(string reason)
@@ -500,8 +507,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
         var nearest = _partyDataList.Where(x => !float.IsNaN(x.Holy2Radius)).OrderBy(x => x.Holy2Radius).Take(3).ToList();
         var mine = _partyDataList.Find(x => x.Mine);
         var (_, hitbox) = Kefka();
-        _lastJudge = new Judge
+        var judge = new Judge
         {
+            Label = $"プル {_pullTime} / {_orchestraNo} 回目のオーケストラ",
             Time = DateTime.Now.ToString("HH:mm:ss"),
             Planned = string.Join(", ", planned.Select(x => $"{x.Name} ({SlotText(x.Slot)})")),
             Targets = string.Join(", ", targets.Select(x => x.Name)),
@@ -512,7 +520,9 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
             Mine = mine == null ? "自分が居ない"
                 : $"{mine.Role} {SlotText(mine.Slot)} / 着弾時の距離 {mine.Holy2Radius:F2} (点 {PointRadiusOf(mine.Slot, hitbox):F2}) / 当たり {mine.Holy2Hits}",
         };
-        Log($"判定: 予定どおり={_lastJudge.PlannedMatch} 近い 3 人={_lastJudge.NearestMatch} / 中心 {_lastJudge.Targets} / 近い順 {_lastJudge.Nearest} / 自分 {_lastJudge.Mine}");
+        _judges.Add(judge);
+        if (_judges.Count > JudgeMax) _judges.RemoveRange(0, _judges.Count - JudgeMax);
+        Log($"判定 ({judge.Label}): 予定どおり={judge.PlannedMatch} 近い 3 人={judge.NearestMatch} / 中心 {judge.Targets} / 近い順 {judge.Nearest} / 自分 {judge.Mine}");
     }
 
     // ---- 表示 -----------------------------------------------------------------
@@ -727,21 +737,28 @@ internal unsafe class P5_Orchestra_Holy : SplatoonScript<P5_Orchestra_Holy.Confi
 
     // ---- Debug: 判定 ----------------------------------------------------------
 
+    /// <summary>直近 JudgeMax 回の判定。新しい順。1 プルで 2 回あるので、プルの時刻と何回目かを見出しにする。</summary>
     private void DrawJudgeTab()
     {
-        if (_lastJudge is not { } j)
+        if (_judges.Count == 0)
         {
             ImGuiEx.Text("まだ 2 回目のホーリーを見ていない");
             return;
         }
-        ImGuiEx.Text($"時刻: {j.Time}");
-        ImGuiEx.Text(ImGuiColors(j.PlannedMatch), $"予定どおり (割り振りの 3 人に飛んだ): {(j.PlannedMatch ? "Y" : "N")}");
-        ImGuiEx.Text(ImGuiColors(j.NearestMatch), $"仮説どおり (着弾時に近い 3 人に飛んだ): {(j.NearestMatch ? "Y" : "N")}");
-        ImGuiEx.TextWrapped($"予定: {j.Planned}");
-        ImGuiEx.TextWrapped($"中心: {j.Targets}");
-        ImGuiEx.TextWrapped($"当たり: {j.Hits}");
-        ImGuiEx.TextWrapped($"近い順 (着弾時): {j.Nearest}");
-        ImGuiEx.TextWrapped($"自分: {j.Mine}");
+        if (ImGui.Button("消去")) _judges.Clear();
+        for (var i = _judges.Count - 1; i >= 0; i--)
+        {
+            var j = _judges[i];
+            ImGui.Separator();
+            ImGuiEx.Text($"{j.Label}  (着弾 {j.Time})");
+            ImGuiEx.Text(ImGuiColors(j.PlannedMatch), $"予定どおり (割り振りの 3 人に飛んだ): {(j.PlannedMatch ? "Y" : "N")}");
+            ImGuiEx.Text(ImGuiColors(j.NearestMatch), $"仮説どおり (着弾時に近い 3 人に飛んだ): {(j.NearestMatch ? "Y" : "N")}");
+            ImGuiEx.TextWrapped($"予定: {j.Planned}");
+            ImGuiEx.TextWrapped($"中心: {j.Targets}");
+            ImGuiEx.TextWrapped($"当たり: {j.Hits}");
+            ImGuiEx.TextWrapped($"近い順 (着弾時): {j.Nearest}");
+            ImGuiEx.TextWrapped($"自分: {j.Mine}");
+        }
     }
 
     // ---- Debug: テスト --------------------------------------------------------
