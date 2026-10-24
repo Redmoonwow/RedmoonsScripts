@@ -86,7 +86,7 @@ public abstract class SplatoonScript { ... }
 | `OnRemoveBuffEffect(uint sourceId, Status Status)` | 解除 |
 | `OnUpdateBuffEffect(uint sourceId, Status status)` | 更新 |
 | `OnObjectCreation(nint newObjectPtr)` | オブジェクト生成直後 |
-| `OnActionEffect(uint ActionID, ushort animationID, ActionEffectType type, uint sourceID, ulong targetOID, uint damage)` | アクション効果 (簡易) |
+| `OnActionEffect(uint ActionID, ushort animationID, ActionEffectType type, uint sourceID, ulong targetOID, uint damage)` | アクション効果 (簡易)。**[Obsolete]**、新しく書くなら `OnActionEffectEvent` |
 | `OnActionEffectEvent(ActionEffectSet set)` | アクション効果 (完全)。`set.Action`, `set.Source`, `set.Target`, `set.TargetEffects` |
 | `OnActorControl(uint sourceId, uint command, uint p1..p8, ulong targetId, byte replaying)` | **VOLATILE**。毎パケット。重い処理を書かない |
 

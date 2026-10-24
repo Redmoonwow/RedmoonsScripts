@@ -133,6 +133,20 @@ BannedApiAnalyzers で RS0030 エラーとして強制されている (このリ
   が出たら `Splatoon/Splatoon/SplatoonScripting/SplatoonScript.cs` の現在の宣言を見て合わせる。
 - **Dalamud enum のリネーム**: `BattleNpcSubKind.Chocobo` → `RaceChocobo` のような改名がある。
   公式スクリプトの最新版を見るのが一番速い。
+- **型名のあいまいさ (CS0104)**: Dalamud 15.0.3.8 (2026-10-17) と同時期の ClientStructs で、よくある名前の型が増えた。
+  - `Rectangle`: `Dalamud.Interface.Utility.Rectangle` が増えた。`using System.Drawing;` と
+    `using Dalamud.Interface.Utility;` (ImGuiHelpers のため) を両方書くとぶつかる。`System.Drawing.Rectangle` と書く
+  - `ExcelPage`: `FFXIVClientStructs.FFXIV.Component.Excel.ExcelPage` が増えた。`using Lumina.Excel;` と
+    `using FFXIVClientStructs.FFXIV.Component.Excel;` を両方書くとぶつかる
+  - 同じ原因で、型チェックのビルドが Splatoon 側で落ちることがある。2026-10-25 時点では Splatoon は
+    ECommons 26d30b9 以降で直っている (submodule を最新にする)。Pictomancy (`ffxiv_pictomancy/Pictomancy/PctDrawList.cs` の
+    `AddClipZone`) と Splatoon の `WrappedRect.cs` は upstream でまだ直っていない。直るまでは手元だけで
+    `System.Drawing.Rectangle` に書き換えてビルドする (コミットしない。submodule の更新で消える)
+- **[Obsolete] の改名** (Dalamud API 15 / 2026-10 時点): `IGameObject.DataId` → `BaseId`、
+  ClientStructs `GameObject.TargetStatus` → `NextTargetStatus`・`YalmDistanceFromPlayerX` → `CurrentDistance`、
+  ECommons の `IsTargetable()` 拡張 → Dalamud の `IsTargetable` プロパティ、`GetTerritoryName` → `ExcelTerritoryHelper.GetName`、
+  `LegacyPlayer.Player` → `GameHelpers.Player`、`OnActionEffect` → `OnActionEffectEvent`。
+  警告で済むが、公式スクリプトをコピーすると旧名が混ざるので新しく書くときは新名で
 - **`OnActorControl` は VOLATILE**: 毎パケット呼ばれる。重い処理を直接書かない。
 - **`OnUpdate` は毎フレーム**: `EzThrottler` / `FrameThrottler` (スクリプトインスタンスごとに
   `EzThrottler` プロパティが生えている) で間引く。

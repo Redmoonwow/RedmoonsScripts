@@ -155,16 +155,16 @@ if (source.TryGetPlayer(out var pc)) { ... }
 var o = someId.GetObject();          // 336 回
 
 // テーブル走査 (419 回)
-var boss = Svc.Objects.FirstOrDefault(x => x.DataId == 12345);
+var boss = Svc.Objects.FirstOrDefault(x => x.BaseId == 12345);
 foreach (var x in Svc.Objects.OfType<IBattleNpc>()) { ... }
-Svc.Objects.Where(x => x.NameId == 4567 && x.IsTargetable())
+Svc.Objects.Where(x => x.NameId == 4567 && x.IsTargetable)   // Dalamud のプロパティ。ECommons の IsTargetable() 拡張は [Obsolete]
 ```
 
 判定に使う識別子:
 
 | プロパティ | 出現数 | 説明 |
 |---|---|---|
-| `DataId` | 226 | モデル/NPC の種別 ID。ボス・雑魚の判定はこれ |
+| `BaseId` | 226 | モデル/NPC の種別 ID。ボス・雑魚の判定はこれ。旧名 `DataId` は [Obsolete] (公式スクリプトにはまだ多い。出現数は旧名を含む) |
 | `NameId` | 94 | ネームプレート名 ID |
 | `EntityId` | — | インスタンス固有 ID |
 | `StatusList` | 324 | バフ/デバフ一覧 (`IBattleChara`) |

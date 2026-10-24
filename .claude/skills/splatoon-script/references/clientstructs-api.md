@@ -138,9 +138,9 @@ Vector3 Position;       float Rotation;      float Scale;   float Height;
 float   HitboxRadius;   float VfxScale;      Vector3 DrawOffset;
 uint    EntityId;       uint  BaseId;        uint  OwnerId;  uint LayoutId;
 ushort  ObjectIndex;    ObjectKind ObjectKind;  byte SubKind / BattleNpcSubKind;
-byte    Sex;            byte EventState;     byte TargetStatus;
+byte    Sex;            byte EventState;     byte NextTargetStatus;   // 旧 TargetStatus ([Obsolete])
 ObjectTargetableFlags TargetableStatus;
-byte    YalmDistanceFromPlayerX / Z;
+byte    CurrentDistance / YalmDistanceFromPlayerZ;   // CurrentDistance は旧 YalmDistanceFromPlayerX ([Obsolete])
 EventId EventId;        ushort FateId;
 DrawObject* DrawObject; EventHandler* EventHandler;  LuaActor* LuaActor;
 uint    NamePlateIconId;  int RenderFlags;
@@ -263,5 +263,5 @@ UI addon。ECommons の `TryGetAddonByName<AtkUnitBase>("AddonName", out var add
   `(BattleChara*)obj.Address` は対象が本当に BattleChara のときだけ有効。
   `obj is IBattleChara` を先に確認する。
 - **Dalamud で取れるものは Dalamud で取る。** `Position` / `Rotation` / `StatusList` /
-  `DataId` / `NameId` / `IsCasting` はすべて `IGameObject` / `ICharacter` / `IBattleChara`
+  `BaseId` (旧 `DataId` は [Obsolete]) / `NameId` / `IsCasting` / `IsTargetable` はすべて `IGameObject` / `ICharacter` / `IBattleChara`
   側に生えている。生ポインタに降りるのは最後の手段。

@@ -109,7 +109,7 @@ string GetNameWithWorld(this IPlayerCharacter? pc);
 GameObject* Struct(this IGameObject o)
 GameObject* GameObject(this IEventObj o)
 EventObject* Struct(this IEventObj o)
-bool IsTargetable(this IGameObject o)
+bool IsTargetable(this IGameObject o)   // [Obsolete]。Dalamud の IGameObject.IsTargetable (プロパティ) を使う
 bool IsHostile(this IGameObject a)
 NameplateKind GetNameplateKind(this IGameObject o)
 bool TryGetPlaceholder(this IGameObject pc, out int number, bool verbose = false)
@@ -487,7 +487,7 @@ T GetRandom<T>(this IEnumerable<T>)
 V? SafeSelect<K,V>(this IReadOnlyDictionary<K,V>, K? key[, V defaultValue])
 T SafeSelect<T>(this IReadOnlyList<T> | T[], int index)          // 範囲外なら default
 T CircularSelect<T>(this IList<T> | T[], int index)              // 剰余でループ
-V GetOrDefault<K,V>(this IDictionary<K,V>, K)
+V GetOrDefault<K,V>(this IDictionary<K,V>, K)                    // [Obsolete]。SafeSelect を使う
 V GetOrCreate<K,V>(this IDictionary<K,V>, K[, V | Func<V>])
 int IndexOf<T>(this IEnumerable<T>, T | Predicate<T>)
 void Each<T>(this IEnumerable<T>, Action<T>)
@@ -514,7 +514,7 @@ K MaxSafe/MinSafe<T,K>(this IEnumerable<T>, Func<T,K> selector)
 uint[] Range(uint inclusiveStart, uint inclusiveEnd)
 bool IsOccupied()
 bool IsKeyPressed(LimitedKeys key | int key | IEnumerable<...>)
-string GetTerritoryName(this Number terr)
+string GetTerritoryName(this Number terr)   // [Obsolete]。ExcelTerritoryHelper.GetName(id) を使う
 ```
 
 ### 文字列
@@ -529,7 +529,7 @@ string GetText(this SeString | Utf8String | ReadOnlySeString, bool onlyFirst = f
 string? NullWhenEmpty(this string);  bool IsNullOrEmpty(this string?)
 ```
 
-### Excel (`ECommons.ExcelHelpers`)
+### Excel (`GenericHelpers` の static。`using static ECommons.GenericHelpers;` が要る)
 
 ```csharp
 ExcelSheet<T> GetSheet<T>([ClientLanguage? language])

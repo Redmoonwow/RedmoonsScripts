@@ -395,6 +395,9 @@ var box = new Box<int>(0);
   (`SplatoonScript.Loc`)。自分専用なら日本語直書きでよい。
 - **重い処理を描画に混ぜない。** `Svc.Objects` の全走査を `OnSettingsDraw` でやると
   設定を開いている間ずっと毎フレーム走る。
+- **`Rectangle` があいまいになる (CS0104)。** Dalamud 15.0.3.8 から `Dalamud.Interface.Utility.Rectangle` がある。
+  `using Dalamud.Interface.Utility;` (ImGuiHelpers) と `using System.Drawing;` を併用するなら
+  `System.Drawing.Rectangle` と書く。
 
 ---
 

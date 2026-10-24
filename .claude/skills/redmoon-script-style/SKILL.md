@@ -779,7 +779,7 @@ public override void OnStartingCast(uint source, uint castId)
 
 | 項目 | 現状 | 公式の期待 |
 |---|---|---|
-| 自機の取得 | `Player.Object` (30 回) | `BasePlayer`。`Player.*` は `BannedSymbols.txt` で RS0030 |
+| 自機の取得 | `Player.Object` (30 回) | `BasePlayer`。`Player.*` は `BannedSymbols.txt` で RS0030。`ECommons.GameHelpers.LegacyPlayer.Player` 自体も `[Obsolete]` (`GameHelpers.Player` へ) |
 | `Metadata` の型 | `public override Metadata? Metadata` | 基底は非 null。`Metadata?` は CS8764 警告 |
 | `Chat.Instance` | 使用 (64 回) | `[Obsolete]`。`Chat.ExecuteCommand` |
 | `IEzConfig` | `class Config : IEzConfig` | 実装不要 (`[Obsolete]`) |

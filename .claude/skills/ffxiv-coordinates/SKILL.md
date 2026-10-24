@@ -220,7 +220,7 @@ float deg2 = float.RadiansToDegrees(rad);
 **ECommons にワールド→マップの関数はない** (逆方向のピクセル→ワールドだけある) ので自前で書く。
 
 ```csharp
-using ECommons;            // GetRow<T>
+using static ECommons.GenericHelpers;   // GetRow<T> (using ECommons; だけでは見えない)
 using Lumina.Excel.Sheets;
 
 // ワールド座標 → マップ座標
