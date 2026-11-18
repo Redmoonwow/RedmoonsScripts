@@ -37,6 +37,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 47856 は塔の 4 人に 1 人ずつ約 1.3 秒おきに当たり、次の頭割りのマーカーは 1 人目が当たった直後に付く。
 /// レイアウトはマーカーで切り替えていたので、後半に踏まれる人 (D2・D4) は塔にいる間に中央が出ていた。
 ///
+/// v5: 次へ移るのは「表示が変わろうとした後に 47856 / 47875 の結果が誰かに出たら」(v4 は自分に当たるまでで、当たらない回に 6 秒止まった)。
+///     敵の詠唱を見る所の NullReferenceException (表示が一瞬全部消えていた) を直した。
 /// v4: 塔・中央から次に移るのは、その回の技の結果 (OnActionEffectApplied) が出てから。塔は自分に地団駄 (47856)、中央は頭割り (47875)。
 ///     次のマーカーは結果より先に付くので、マーカーで切り替えると早かった (v1 の「自分に当たるまで塔」もこれに置き換え)。
 /// v3: 「自分のロールに頭割り」は同じロールの誰か 1 人に付いたら (v1・v2 は 4 人全員で、マーカーは 1 人にしか付かないので中央に移らなかった)。
@@ -80,7 +82,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private const long StackVfxMs = 5000;
     private const uint StompHit = 47856;       // 塔の 4 人に 2 人ずつ約 1.3 秒おきに当たる
     private const uint StackHit = 47875;       // 頭割りの着弾
-    private const long ResolveHoldMaxMs = 6000; // 結果が取れなかった時の保険
+    private const long ResolveHoldMaxMs = 3000; // 結果が取れなかった時の保険
 
     // 色・太さ・塗りはレイアウトの値
     private const uint ColMiddle = 3357671168, ColRelSpot = 3355508496, ColPreLeft = 3355508731, ColPreRight = 3355508706;
@@ -93,7 +95,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(4, "Redmoon");
+    public override Metadata? Metadata => new(5, "Redmoon");
     #endregion
 
     #region private properties
@@ -102,14 +104,13 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /********************************************************************/
     private Config C => Controller.GetConfig<Config>();
     private readonly Dictionary<uint, long> _stackVfxAt = [];   // EntityId → 頭割りの VFX が付いた時刻 (TickCount64)
-    // 塔・中央は、その回の技の結果 (Applied) が出るまで次を出さない。次の頭割りのマーカーは結果より先に付く
-    // (例: マーカー 56.595 → 着弾 56.655 → 塔の 1 組目 56.725 → 2 組目 58.040)
+    // 塔・中央から次へ移るのは、表示が変わろうとした後に地団駄 (47856) か頭割り (47875) の結果 (Applied) が誰かに出てから。
+    // 次の頭割りのマーカーは結果より 0.06〜0.13 秒先に付く (例: マーカー 25.044 → 着弾 25.106 → 塔の 1 組目 25.174)
     private enum Spot { None, Tower, Middle }
     private Spot _holdSpot = Spot.None;
     private readonly List<string> _holdNames = [];
-    private long _holdStartMs;
-    private long _towerHitMs;   // 地団駄 (47856) の結果が自分に出た時刻
-    private long _stackHitMs;   // 頭割り (47875) の結果が出た時刻
+    private long _pendingSinceMs;   // 表示が変わろうとした時刻 (0 = 変わろうとしていない)
+    private long _appliedMs;        // 47856 / 47875 の結果が最後に出た時刻
 
     // 条件のつなぎ目で表示が空になった時、直前の表示をこの間だけ残す。
     // 隙間: ブリザガの着弾 → 1 回目の頭割りのマーカー (約 0.4 秒)、マーカーの 5 秒の窓 → 次のマーカー (約 0.5 秒。間隔は約 5.5 秒)
@@ -155,17 +156,14 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         _stackVfxAt.Clear();
         _holdSpot = Spot.None;
         _holdNames.Clear();
-        _towerHitMs = _stackHitMs = 0;
+        _pendingSinceMs = _appliedMs = 0;
         _lastShown.Clear();
     }
 
-    // 技の結果が実際に出た瞬間 (OnActionEffectApplied)。塔は自分に当たった時、頭割りは誰かに当たった時
+    // 技の結果が実際に出た瞬間 (OnActionEffectApplied)。誰に当たったかは問わない
     public override void OnActionEffectApplied(ECommons.Hooks.ActionEffectTypes.ActionEffectSet set, int targetIndex, ActionEffectResult result)
     {
-        var id = set.Header.ActionID;
-        var now = Environment.TickCount64;
-        if (id == StompHit && BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId)) _towerHitMs = now;
-        else if (id == StackHit) _stackHitMs = now;
+        if (set.Header.ActionID is StompHit or StackHit) _appliedMs = Environment.TickCount64;
     }
 
     public override void OnUpdate()
@@ -226,15 +224,14 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         }
     }
 
-    // 塔・中央を出している間に表示が変わろうとしたら、その回の結果が出るまで今の表示のまま。
-    // 塔 = 自分に地団駄 (47856) の結果が出るまで (2 組目に踏まれる D2・D4 は 1 組目より約 1.3 秒遅い)、中央 = 頭割り (47875) の結果が出るまで
+    // 塔・中央を出している間に表示が変わろうとしたら、その後に 47856 / 47875 の結果が出るまで今の表示のまま
     private void HoldUntilResolved(long now)
     {
         var spot = _shown.Any(n => n.StartsWith("F_")) ? Spot.Tower : _shown.Contains("G_Middle") ? Spot.Middle : Spot.None;
         if (_holdSpot != Spot.None && spot != _holdSpot)
         {
-            var resolvedAt = _holdSpot == Spot.Tower ? _towerHitMs : _stackHitMs;
-            if (resolvedAt < _holdStartMs && now - _holdStartMs <= ResolveHoldMaxMs)
+            if (_pendingSinceMs == 0) _pendingSinceMs = now;
+            if (_appliedMs < _pendingSinceMs && now - _pendingSinceMs <= ResolveHoldMaxMs)
             {
                 _shown.Clear();
                 _shown.AddRange(_holdNames);
@@ -242,9 +239,9 @@ internal class P3_Stomp_A_Mole : SplatoonScript
             }
             _holdSpot = Spot.None;
         }
+        _pendingSinceMs = 0;
         if (spot != Spot.None)
         {
-            if (spot != _holdSpot) _holdStartMs = now;
             _holdSpot = spot;
             _holdNames.Clear();
             _holdNames.AddRange(_shown);
@@ -284,9 +281,20 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     }
 
     // NameID の敵がその技を詠唱中か。maxElapsed があれば詠唱開始からその秒数以内だけ
-    private static bool IsCasting(uint nameId, uint castId, float? maxElapsed) =>
-        Svc.Objects.OfType<IBattleNpc>().Any(x => x.NameId == nameId && x.IsCasting && x.CastActionId == castId
-                                                 && (maxElapsed == null || x.CurrentCastTime <= maxElapsed.Value));
+    // 消えかけの敵で NullReferenceException が出ることがあった (00:00〜00:17 に 604 回。落ちたフレームは表示が全部消えていた)。1 体ずつ守る
+    private static bool IsCasting(uint nameId, uint castId, float? maxElapsed)
+    {
+        foreach (var o in Svc.Objects)
+        {
+            try
+            {
+                if (o is not IBattleNpc x || x.NameId != nameId || !x.IsCasting || x.CastActionId != castId) continue;
+                if (maxElapsed == null || x.CurrentCastTime <= maxElapsed.Value) return true;
+            }
+            catch (NullReferenceException) { }
+        }
+        return false;
+    }
 
     private bool IsDpsSide() => C.Role switch
     {
