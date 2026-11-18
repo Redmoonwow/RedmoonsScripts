@@ -6,6 +6,8 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
+using ECommons.GameFunctions;
+using ECommons.Hooks.ActionEffectTypes;
 using ECommons.ImGuiMethods;
 using Splatoon;
 using Splatoon.SplatoonScripting;
@@ -17,32 +19,27 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// </summary>
 /// <remarks>
 /// Splatoon のレイアウト「[Select configuration] Dmad P3 Stomp a mole - dps (rel south)」と
-/// 「… - support (rel north)」(グループ「絶妖星乱舞 - NXIV &amp; mirage(translate)」) をスクリプトに写したもの。
-/// レイアウトの条件付き表示 (Conditional) を同じ順にコードで書いた。描く物・位置・色はレイアウトのまま。
+/// 「… - support (rel north)」(グループ「絶妖星乱舞 - NXIV &amp; mirage(translate)」) の表示 (位置・色・線) を写したもの。
+/// いつ何を出すかは、レイアウトの「マーカーの 5 秒の窓」ではなく、ギミックの順番で決める (v6)。
 ///
-/// 条件 (どれもレイアウトと同じ):
-///   ブリザガ    NameID 6052 が 47887 を詠唱中
-///   地団駄 4 秒  NameID 7131 が 47855 を詠唱して 4 秒以内
-///   頭割り      com_share3t の VFX が 5 秒以内に付いた (誰か / 自分のロールの誰か)
-/// 表示:
-///   ブリザガ中                         → [A] ブリザガの位置 + [B] 予備の位置
-///   自分のロールに頭割り & 地団駄 4 秒以内 → 両方の塔に「入らない」 + [C] 予備の位置
-///   相手のロールに頭割り & 地団駄 4 秒以内 → [D] 自分の塔 + [E] 予備の位置
-///   相手のロールに頭割り & それ以降       → [F] 自分の塔 (線あり)
-///   自分のロールに頭割り & それ以降       → 両方の塔に「入らない」 + [G] 中央
+/// 順番 (ログ 3 本で確認):
+///   ブリザガ (47887) の詠唱               → [A] ブリザガの位置 + [B] 予備の位置
+///   地団駄 (47855) の詠唱 → 1 回目の頭割りのマーカー (com_share3t、1 人に付く) → そのロールが中央、反対のロールが塔
+///     地団駄の詠唱 4 秒以内: 中央 = 両方の塔に「入らない」+ [C] 予備 / 塔 = [D] 塔 + [E] 予備
+///     それ以降:             中央 = 両方の塔に「入らない」+ [G] 中央 / 塔 = [F] 塔 (線あり)
+///   塔の地団駄 (47856) は 2 人ずつ 4 組、約 1.3 秒おき。1・2 組目が 1 回目の塔、3・4 組目が 2 回目の塔
+///   1 回目の頭割り (47875) が着弾 → 役割を入れ替えて 2 回目 (2 回目のマーカーは反対のロールに付く)
+///   2 回目の頭割りが着弾 → 終わり (何も出さない)
+/// 役割が終わる時:
+///   中央 = その回の頭割り (47875) の結果 (OnActionEffectApplied) が出た時
+///   塔   = 自分に地団駄 (47856) の結果が出た時。当たらなかった時 (死んでいる等) はその回の 2 組目が出た時
+///          → 先に踏まれる D1・D3 は 1 組目で、後に踏まれる D2・D4 は 2 組目で次へ
 /// 位置はケフカ (NameID 7131) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
 /// DPS は南寄り (+Y 9)、タンク・ヒーラーは北寄り (-Y 9)。ロールはジョブから自動 (設定で固定もできる)。
 ///
-/// レイアウトからの変更は 1 つだけ: 塔 ([F]) から中央 ([G]) へ切り替えるのを、自分に塔の地団駄 (47856) が当たるまで待つ。
-/// 47856 は塔の 4 人に 1 人ずつ約 1.3 秒おきに当たり、次の頭割りのマーカーは 1 人目が当たった直後に付く。
-/// レイアウトはマーカーで切り替えていたので、後半に踏まれる人 (D2・D4) は塔にいる間に中央が出ていた。
-///
-/// v5: 次へ移るのは「表示が変わろうとした後に 47856 / 47875 の結果が誰かに出たら」(v4 は自分に当たるまでで、当たらない回に 6 秒止まった)。
-///     敵の詠唱を見る所の NullReferenceException (表示が一瞬全部消えていた) を直した。
-/// v4: 塔・中央から次に移るのは、その回の技の結果 (OnActionEffectApplied) が出てから。塔は自分に地団駄 (47856)、中央は頭割り (47875)。
-///     次のマーカーは結果より先に付くので、マーカーで切り替えると早かった (v1 の「自分に当たるまで塔」もこれに置き換え)。
-/// v3: 「自分のロールに頭割り」は同じロールの誰か 1 人に付いたら (v1・v2 は 4 人全員で、マーカーは 1 人にしか付かないので中央に移らなかった)。
-/// v2: 条件のつなぎ目 (ブリザガの着弾 → 1 回目のマーカー、5 秒の窓 → 次のマーカー) で表示が一瞬消えるので、空になったら直前の表示を 1.5 秒残す。
+/// v6: 順番どおりに進む作りに書き直した (v5 まではレイアウトの条件を写していて、最後の頭割りの着弾を見ていなかった)。
+/// v5: 敵の詠唱を見る所の NullReferenceException を直した。
+/// v3: マーカーは 1 人にしか付かないので、ロールは「誰か 1 人」で見る。
 ///
 /// 元のレイアウトを有効にしたままだと二重に描くので、レイアウトは切っておく。
 /// </remarks>
@@ -77,12 +74,12 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private const uint BlizzardCast = 47887;
     private const uint KefkaNameId = 7131;
     private const uint StompCast = 47855;
+    private const uint StompHit = 47856;    // 塔の 2 人ずつ 4 組
+    private const uint StackHit = 47875;    // 頭割りの着弾
     private const float StompEarlySeconds = 4f;
     private const string StackVfx = "vfx/lockon/eff/com_share3t.avfx";
-    private const long StackVfxMs = 5000;
-    private const uint StompHit = 47856;       // 塔の 4 人に 2 人ずつ約 1.3 秒おきに当たる
-    private const uint StackHit = 47875;       // 頭割りの着弾
-    private const long ResolveHoldMaxMs = 3000; // 結果が取れなかった時の保険
+    private const long MechanicMaxMs = 25000;   // 地団駄の詠唱からこれを過ぎたら終わり扱い (保険)
+    private const long BlizzardGapMs = 3000;    // ブリザガの詠唱が終わってから 1 回目のマーカーまで [A][B] を残す
 
     // 色・太さ・塗りはレイアウトの値
     private const uint ColMiddle = 3357671168, ColRelSpot = 3355508496, ColPreLeft = 3355508731, ColPreRight = 3355508706;
@@ -95,7 +92,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(5, "Redmoon");
+    public override Metadata? Metadata => new(6, "Redmoon");
     #endregion
 
     #region private properties
@@ -103,21 +100,14 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* private properties                                               */
     /********************************************************************/
     private Config C => Controller.GetConfig<Config>();
-    private readonly Dictionary<uint, long> _stackVfxAt = [];   // EntityId → 頭割りの VFX が付いた時刻 (TickCount64)
-    // 塔・中央から次へ移るのは、表示が変わろうとした後に地団駄 (47856) か頭割り (47875) の結果 (Applied) が誰かに出てから。
-    // 次の頭割りのマーカーは結果より 0.06〜0.13 秒先に付く (例: マーカー 25.044 → 着弾 25.106 → 塔の 1 組目 25.174)
-    private enum Spot { None, Tower, Middle }
-    private Spot _holdSpot = Spot.None;
-    private readonly List<string> _holdNames = [];
-    private long _pendingSinceMs;   // 表示が変わろうとした時刻 (0 = 変わろうとしていない)
-    private long _appliedMs;        // 47856 / 47875 の結果が最後に出た時刻
 
-    // 条件のつなぎ目で表示が空になった時、直前の表示をこの間だけ残す。
-    // 隙間: ブリザガの着弾 → 1 回目の頭割りのマーカー (約 0.4 秒)、マーカーの 5 秒の窓 → 次のマーカー (約 0.5 秒。間隔は約 5.5 秒)
-    private const long GapHoldMs = 1500;
-    private readonly List<string> _shown = [];
-    private readonly List<string> _lastShown = [];
-    private long _lastShownMs;
+    private long _stompStartMs;            // 地団駄 (47855) の詠唱が始まった時刻 (0 = ギミックの外)
+    private long _blizzardSeenMs;          // ブリザガの詠唱を最後に見た時刻
+    private bool? _firstMarkerOnDps;       // 1 回目のマーカーが DPS に付いたか (null = まだ)
+    private int _stompPairs;               // 塔の地団駄 (47856) の結果が出た組の数
+    private int _myStompPair;              // 自分が踏まれた組 (1〜4、0 = まだ)
+    private int _stacks;                   // 頭割り (47875) の結果が出た回数
+    private int _lastStompSet = -1, _lastStackSet = -1;   // 同じ技の 2 人目以降を数えないため
     #endregion
 
     #region public methods
@@ -146,106 +136,91 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         Controller.RegisterElement("F_R", Rel(-10f, 0f, 4f, 1f, ColTowerRightT, 4f, 0.5f, tether: true));
     }
 
+    public override void OnStartingCast(uint source, uint castId)
+    {
+        if (castId != StompCast) return;
+        OnReset();
+        _stompStartMs = Environment.TickCount64;
+    }
+
+    // 1 回目のマーカーだけ使う (2 回目は反対のロールに付く)
     public override void OnVFXSpawn(uint target, string vfxPath)
     {
-        if (vfxPath == StackVfx) _stackVfxAt[target] = Environment.TickCount64;
+        if (vfxPath != StackVfx || _stompStartMs == 0 || _firstMarkerOnDps != null) return;
+        if (target.GetObject() is IPlayerCharacter pc) _firstMarkerOnDps = IsDps(pc);
+    }
+
+    // 技の結果が実際に出た瞬間。同じ技 (同じ組) の 2 人目以降は数えない
+    public override void OnActionEffectApplied(ActionEffectSet set, int targetIndex, ActionEffectResult result)
+    {
+        if (_stompStartMs == 0) return;
+        var id = set.Header.ActionID;
+        var seq = (int)set.Header.GlobalEffectCounter;
+        if (id == StompHit)
+        {
+            if (seq != _lastStompSet) { _lastStompSet = seq; _stompPairs++; }
+            if (BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId) && _myStompPair == 0)
+                _myStompPair = _stompPairs;
+        }
+        else if (id == StackHit && seq != _lastStackSet)
+        {
+            _lastStackSet = seq;
+            _stacks++;
+        }
     }
 
     public override void OnReset()
     {
-        _stackVfxAt.Clear();
-        _holdSpot = Spot.None;
-        _holdNames.Clear();
-        _pendingSinceMs = _appliedMs = 0;
-        _lastShown.Clear();
-    }
-
-    // 技の結果が実際に出た瞬間 (OnActionEffectApplied)。誰に当たったかは問わない
-    public override void OnActionEffectApplied(ECommons.Hooks.ActionEffectTypes.ActionEffectSet set, int targetIndex, ActionEffectResult result)
-    {
-        if (set.Header.ActionID is StompHit or StackHit) _appliedMs = Environment.TickCount64;
+        _stompStartMs = 0;
+        _firstMarkerOnDps = null;
+        _stompPairs = _myStompPair = _stacks = 0;
+        _lastStompSet = _lastStackSet = -1;
     }
 
     public override void OnUpdate()
     {
         HideAll();
-        _shown.Clear();
         if (BasePlayer == null) return;
-
         var now = Environment.TickCount64;
-        Decide(now);
-        HoldUntilResolved(now);
-        if (_shown.Count > 0)
-        {
-            _lastShown.Clear();
-            _lastShown.AddRange(_shown);
-            _lastShownMs = now;
-        }
-        else if (_lastShown.Count > 0 && now - _lastShownMs <= GapHoldMs)
-        {
-            _shown.AddRange(_lastShown);
-        }
-        foreach (var name in _shown)
-            if (Controller.TryGetElementByName(name, out var e)) e.Enabled = true;
-    }
+        if (_stompStartMs != 0 && now - _stompStartMs > MechanicMaxMs) OnReset();
 
-    private void Decide(long now)
-    {
         var dps = IsDpsSide();
         var r = dps ? "D" : "S";
         var lr = C.Side == Side.Left ? "L" : "R";
 
+        // ブリザガ: 詠唱中と、終わってから 1 回目のマーカーが付くまで (レイアウトはここで一瞬消えていた)
         var blizzard = IsCasting(BlizzardNameId, BlizzardCast, null);
-        var stompEarly = IsCasting(KefkaNameId, StompCast, StompEarlySeconds);
-        var anyStack = _stackVfxAt.Values.Any(t => now - t <= StackVfxMs);
-        var myRoleStack = RoleMembers(dps) is { Count: > 0 } members
-                          && members.Any(m => _stackVfxAt.TryGetValue(m.EntityId, out var t) && now - t <= StackVfxMs);
-
-        if (blizzard)
+        if (blizzard) _blizzardSeenMs = now;
+        if (blizzard || (_stompStartMs != 0 && _firstMarkerOnDps == null && now - _blizzardSeenMs <= BlizzardGapMs))
         {
             Show(C.Strat == Strat.Regular ? "A_Middle" : $"A_Rel_{r}");
             Show($"B_{lr}_{r}");
+            return;
         }
-        if (myRoleStack && stompEarly)
-        {
-            Show("NoTower_L"); Show("NoTower_R"); Show($"Pre_{lr}_{r}");
-        }
-        if (anyStack && !myRoleStack && stompEarly)
-        {
-            Show($"D_{lr}"); Show($"Pre_{lr}_{r}");
-        }
-        if (anyStack && !myRoleStack && !stompEarly)
-        {
-            Show($"F_{lr}");
-        }
-        if (myRoleStack && !stompEarly)
-        {
-            Show("NoTower_L"); Show("NoTower_R"); Show("G_Middle");
-        }
-    }
+        if (_stompStartMs == 0 || _firstMarkerOnDps == null) return;
 
-    // 塔・中央を出している間に表示が変わろうとしたら、その後に 47856 / 47875 の結果が出るまで今の表示のまま
-    private void HoldUntilResolved(long now)
-    {
-        var spot = _shown.Any(n => n.StartsWith("F_")) ? Spot.Tower : _shown.Contains("G_Middle") ? Spot.Middle : Spot.None;
-        if (_holdSpot != Spot.None && spot != _holdSpot)
+        var middleFirst = _firstMarkerOnDps == dps;   // 1 回目は自分のロールが中央か
+        var round1Done = middleFirst ? _stacks >= 1 : TowerDone(1);
+        if (!round1Done)
         {
-            if (_pendingSinceMs == 0) _pendingSinceMs = now;
-            if (_appliedMs < _pendingSinceMs && now - _pendingSinceMs <= ResolveHoldMaxMs)
+            var early = IsCasting(KefkaNameId, StompCast, StompEarlySeconds);
+            if (middleFirst)
             {
-                _shown.Clear();
-                _shown.AddRange(_holdNames);
-                return;
+                Show("NoTower_L"); Show("NoTower_R"); Show(early ? $"Pre_{lr}_{r}" : "G_Middle");
             }
-            _holdSpot = Spot.None;
+            else
+            {
+                if (early) { Show($"D_{lr}"); Show($"Pre_{lr}_{r}"); }
+                else Show($"F_{lr}");
+            }
+            return;
         }
-        _pendingSinceMs = 0;
-        if (spot != Spot.None)
-        {
-            _holdSpot = spot;
-            _holdNames.Clear();
-            _holdNames.AddRange(_shown);
-        }
+
+        // 2 回目は役割が入れ替わる
+        var round2Done = middleFirst ? TowerDone(2) : _stacks >= 2;
+        if (round2Done) return;
+        if (middleFirst) Show($"F_{lr}");
+        else { Show("NoTower_L"); Show("NoTower_R"); Show("G_Middle"); }
     }
 
     public override void OnSettingsDraw()
@@ -253,7 +228,9 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         ImGuiEx.EnumCombo("作戦##strat", ref C.Strat);
         ImGuiEx.EnumCombo("ケフカの顔を見て左右##side", ref C.Side);
         ImGuiEx.EnumCombo("ロール (Auto = ジョブから)##role", ref C.Role);
-        ImGuiEx.Text($"今の判定: {(IsDpsSide() ? "DPS (南寄り)" : "タンク・ヒーラー (北寄り)")} / 頭割りの記録 {_stackVfxAt.Count} 件");
+        ImGuiEx.Text($"今の判定: {(IsDpsSide() ? "DPS (南寄り)" : "タンク・ヒーラー (北寄り)")}");
+        ImGuiEx.Text($"ギミック中: {_stompStartMs != 0} / 1 回目のマーカー: {(_firstMarkerOnDps == null ? "-" : _firstMarkerOnDps.Value ? "DPS" : "サポート")}"
+                     + $" / 塔の組 {_stompPairs} (自分 {_myStompPair}) / 頭割り {_stacks}");
     }
     #endregion
 
@@ -261,6 +238,15 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /********************************************************************/
     /* private methods                                                  */
     /********************************************************************/
+    // その回 (1 = 1・2 組目、2 = 3・4 組目) の塔が自分の分まで終わったか
+    private bool TowerDone(int round)
+    {
+        var first = round * 2 - 1;
+        var last = round * 2;
+        if (_myStompPair >= first && _myStompPair <= last) return true;
+        return _stompPairs >= last;
+    }
+
     private static Element Fixed(uint color, bool tether) => new(0)
     {
         refX = 100f, refY = 100f, radius = 2f, Donut = 0.5f, color = color, Filled = true, fillIntensity = 0.5f, thicc = 5f, tether = tether,
@@ -273,15 +259,18 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         offX = x, offY = y, radius = radius, Donut = donut, color = color, Filled = true, fillIntensity = fill, thicc = thicc, tether = tether,
     };
 
-    private void Show(string name) => _shown.Add(name);
+    private void Show(string name)
+    {
+        if (Controller.TryGetElementByName(name, out var e)) e.Enabled = true;
+    }
 
     private void HideAll()
     {
         foreach (var e in Controller.GetRegisteredElements()) e.Value.Enabled = false;
     }
 
-    // NameID の敵がその技を詠唱中か。maxElapsed があれば詠唱開始からその秒数以内だけ
-    // 消えかけの敵で NullReferenceException が出ることがあった (00:00〜00:17 に 604 回。落ちたフレームは表示が全部消えていた)。1 体ずつ守る
+    // NameID の敵がその技を詠唱中か。maxElapsed があれば詠唱開始からその秒数以内だけ。
+    // 消えかけの敵で NullReferenceException が出ることがあったので 1 体ずつ守る
     private static bool IsCasting(uint nameId, uint castId, float? maxElapsed)
     {
         foreach (var o in Svc.Objects)
@@ -305,8 +294,5 @@ internal class P3_Stomp_A_Mole : SplatoonScript
 
     // ClassJob の Role: 1 タンク / 2 近接 / 3 遠隔 / 4 ヒーラー
     private static bool IsDps(IPlayerCharacter? pc) => pc != null && pc.ClassJob.Value.Role is 2 or 3;
-
-    // レイアウトの <d1>〜<d4> / <h1> <h2> <t1> <t2> (refActorComparisonAnd = 「その人であること」と「VFX」の両方。4 人全員ではない)
-    private List<IPlayerCharacter> RoleMembers(bool dps) => Controller.GetPartyMembers().Where(p => IsDps(p) == dps).ToList();
     #endregion
 }
