@@ -23,7 +23,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 条件 (どれもレイアウトと同じ):
 ///   ブリザガ    NameID 6052 が 47887 を詠唱中
 ///   地団駄 4 秒  NameID 7131 が 47855 を詠唱して 4 秒以内
-///   頭割り      com_share3t の VFX が 5 秒以内に付いた (誰か / 自分のロール 4 人全員)
+///   頭割り      com_share3t の VFX が 5 秒以内に付いた (誰か / 自分のロールの誰か)
 /// 表示:
 ///   ブリザガ中                         → [A] ブリザガの位置 + [B] 予備の位置
 ///   自分のロールに頭割り & 地団駄 4 秒以内 → 両方の塔に「入らない」 + [C] 予備の位置
@@ -37,6 +37,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 47856 は塔の 4 人に 1 人ずつ約 1.3 秒おきに当たり、次の頭割りのマーカーは 1 人目が当たった直後に付く。
 /// レイアウトはマーカーで切り替えていたので、後半に踏まれる人 (D2・D4) は塔にいる間に中央が出ていた。
 ///
+/// v3: 「自分のロールに頭割り」は同じロールの誰か 1 人に付いたら (v1・v2 は 4 人全員で、マーカーは 1 人にしか付かないので中央に移らなかった)。
 /// v2: 条件のつなぎ目 (ブリザガの着弾 → 1 回目のマーカー、5 秒の窓 → 次のマーカー) で表示が一瞬消えるので、空になったら直前の表示を 1.5 秒残す。
 ///
 /// 元のレイアウトを有効にしたままだと二重に描くので、レイアウトは切っておく。
@@ -89,7 +90,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(2, "Redmoon");
+    public override Metadata? Metadata => new(3, "Redmoon");
     #endregion
 
     #region private properties
@@ -185,7 +186,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         var stompEarly = IsCasting(KefkaNameId, StompCast, StompEarlySeconds);
         var anyStack = _stackVfxAt.Values.Any(t => now - t <= StackVfxMs);
         var myRoleStack = RoleMembers(dps) is { Count: > 0 } members
-                          && members.All(m => _stackVfxAt.TryGetValue(m.EntityId, out var t) && now - t <= StackVfxMs);
+                          && members.Any(m => _stackVfxAt.TryGetValue(m.EntityId, out var t) && now - t <= StackVfxMs);
 
         if (blizzard)
         {
@@ -268,7 +269,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     // ClassJob の Role: 1 タンク / 2 近接 / 3 遠隔 / 4 ヒーラー
     private static bool IsDps(IPlayerCharacter? pc) => pc != null && pc.ClassJob.Value.Role is 2 or 3;
 
-    // レイアウトの <d1>〜<d4> / <h1> <h2> <t1> <t2>: パーティの同じロールの 4 人
+    // レイアウトの <d1>〜<d4> / <h1> <h2> <t1> <t2> (refActorComparisonAnd = 「その人であること」と「VFX」の両方。4 人全員ではない)
     private List<IPlayerCharacter> RoleMembers(bool dps) => Controller.GetPartyMembers().Where(p => IsDps(p) == dps).ToList();
     #endregion
 }
