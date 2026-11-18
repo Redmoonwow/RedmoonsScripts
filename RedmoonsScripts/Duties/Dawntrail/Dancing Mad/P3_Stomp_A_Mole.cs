@@ -37,6 +37,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 位置はケフカ本体 (DataId 19504) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
 /// DPS は南寄り (+Y 9)、タンク・ヒーラーは北寄り (-Y 9)。ロールはジョブから自動 (設定で固定もできる)。
 ///
+/// v12: 通常の流れはイベントだけ (人数 / 2)。組が 1 人だけ (死んでいる等) の時だけ、間隔 0.6 秒で 1 人分足して立て直す。
 /// v11: 塔は当たった人数で数える (組 = 人数 / 2)。v10 の左右の判定はやめた。
 /// v10: 1 回目の中央 → 塔は「頭割りの着弾」かつ「2 組目で担当方向の塔にダメージ」。地団駄が当たった人の位置で左右を判定して記録にも出す。
 /// v9: 1 回目に中央の人が塔へ移るのは、頭割りの着弾ではなく塔の 2 組目がダメージを受けた時 (逆のパターンの DPS など)。
@@ -86,6 +87,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private const float StompEarlySeconds = 4f;
     private const string StackVfx = "vfx/lockon/eff/com_share3t.avfx";
     private const long MechanicMaxMs = 25000;   // 地団駄の詠唱からこれを過ぎたら終わり扱い (保険)
+    private const long PairGapMs = 600;          // 異常の立て直し用。組の 2 人の結果は 50〜90ms 差、組と組は 1.3 秒おき
     private const long BlizzardGapMs = 3000;    // ブリザガの詠唱が終わってから 1 回目のマーカーまで [A][B] を残す
 
     // 色・太さ・塗りはレイアウトの値
@@ -99,7 +101,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(11, "Redmoon");
+    public override Metadata? Metadata => new(12, "Redmoon");
     #endregion
 
     #region private properties
@@ -115,6 +117,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private int _myStompPair;              // 自分が踏まれた組 (1〜4、0 = まだ)
     private int _stacks;                   // 頭割り (47875) の結果が出た回数
     private int _lastStackSet = -1;        // 頭割りの 2 人目以降を数えないため
+    private long _lastStompHitMs;          // 最後に塔の地団駄の結果が出た時刻 (異常の立て直しだけに使う)
 
     // 記録 (設定画面からコピーする。dalamud.log には頼らない)
     private readonly List<string> _log = [];
@@ -175,7 +178,11 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         var seq = (int)set.Header.GlobalEffectCounter;
         if (id == StompHit)
         {
+            var now = Environment.TickCount64;
+            // 異常: 人数が奇数のまま次の組が来た = 前の組は 1 人だけ (死んでいる等)。1 人分足して組を合わせる
+            if (_stompHits % 2 == 1 && now - _lastStompHitMs > PairGapMs) FixSinglePair("次の組が来た");
             _stompHits++;
+            _lastStompHitMs = now;
             var mine = BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId);
             if (mine && _myStompPair == 0) _myStompPair = (_stompHits + 1) / 2;
             Log($"塔の地団駄 47856 {_stompHits} 人目 (組 {(_stompHits + 1) / 2}): target {Who(result.TargetId)}{(mine ? " ← 自分" : "")}");
@@ -193,6 +200,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         _firstMarkerOnDps = null;
         _stompHits = _myStompPair = _stacks = 0;
         _lastStackSet = -1;
+        _lastStompHitMs = 0;
     }
 
     public override void OnUpdate()
@@ -213,6 +221,8 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (BasePlayer == null) return;
         var now = Environment.TickCount64;
         if (_stompStartMs != 0 && now - _stompStartMs > MechanicMaxMs) OnReset();
+        // 異常: 人数が奇数のまま 0.6 秒 = 最後の組が 1 人だけ (次の組が来ないので時間で直す)
+        if (_stompHits % 2 == 1 && now - _lastStompHitMs > PairGapMs) FixSinglePair("0.6 秒経過");
 
         var dps = IsDpsSide();
         var r = dps ? "D" : "S";
@@ -302,6 +312,12 @@ internal class P3_Stomp_A_Mole : SplatoonScript
             catch (NullReferenceException) { }
         }
         return list.Count == 0 ? "7131 なし" : string.Join(" ", list);
+    }
+
+    private void FixSinglePair(string why)
+    {
+        _stompHits++;
+        Log($"立て直し ({why}): 組 {_stompHits / 2} は 1 人だけだったので 1 人分足した (塔 {_stompHits} 人)");
     }
 
     // その回 (1 = 1・2 組目、2 = 3・4 組目) の塔が自分の分まで終わったか。
