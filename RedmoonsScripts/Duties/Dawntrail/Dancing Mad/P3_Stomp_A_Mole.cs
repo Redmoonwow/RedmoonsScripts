@@ -37,6 +37,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 47856 は塔の 4 人に 1 人ずつ約 1.3 秒おきに当たり、次の頭割りのマーカーは 1 人目が当たった直後に付く。
 /// レイアウトはマーカーで切り替えていたので、後半に踏まれる人 (D2・D4) は塔にいる間に中央が出ていた。
 ///
+/// v2: 条件のつなぎ目 (ブリザガの着弾 → 1 回目のマーカー、5 秒の窓 → 次のマーカー) で表示が一瞬消えるので、空になったら直前の表示を 1.5 秒残す。
+///
 /// 元のレイアウトを有効にしたままだと二重に描くので、レイアウトは切っておく。
 /// </remarks>
 internal class P3_Stomp_A_Mole : SplatoonScript
@@ -87,7 +89,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(1, "Redmoon");
+    public override Metadata? Metadata => new(2, "Redmoon");
     #endregion
 
     #region private properties
@@ -97,6 +99,13 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private Config C => Controller.GetConfig<Config>();
     private readonly Dictionary<uint, long> _stackVfxAt = [];   // EntityId → 頭割りの VFX が付いた時刻 (TickCount64)
     private long _towerSince;   // 塔 ([F]) を出し始めた時刻。自分に地団駄 (47856) が当たるまで塔を出し続ける (0 = 塔にいない)
+
+    // 条件のつなぎ目で表示が空になった時、直前の表示をこの間だけ残す。
+    // 隙間: ブリザガの着弾 → 1 回目の頭割りのマーカー (約 0.4 秒)、マーカーの 5 秒の窓 → 次のマーカー (約 0.5 秒。間隔は約 5.5 秒)
+    private const long GapHoldMs = 1500;
+    private readonly List<string> _shown = [];
+    private readonly List<string> _lastShown = [];
+    private long _lastShownMs;
     #endregion
 
     #region public methods
@@ -134,6 +143,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     {
         _stackVfxAt.Clear();
         _towerSince = 0;
+        _lastShown.Clear();
     }
 
     // 自分に塔の地団駄が当たったら塔を終える
@@ -146,9 +156,27 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     public override void OnUpdate()
     {
         HideAll();
+        _shown.Clear();
         if (BasePlayer == null) return;
 
         var now = Environment.TickCount64;
+        Decide(now);
+        if (_shown.Count > 0)
+        {
+            _lastShown.Clear();
+            _lastShown.AddRange(_shown);
+            _lastShownMs = now;
+        }
+        else if (_lastShown.Count > 0 && now - _lastShownMs <= GapHoldMs)
+        {
+            _shown.AddRange(_lastShown);
+        }
+        foreach (var name in _shown)
+            if (Controller.TryGetElementByName(name, out var e)) e.Enabled = true;
+    }
+
+    private void Decide(long now)
+    {
         var dps = IsDpsSide();
         var r = dps ? "D" : "S";
         var lr = C.Side == Side.Left ? "L" : "R";
@@ -218,10 +246,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         offX = x, offY = y, radius = radius, Donut = donut, color = color, Filled = true, fillIntensity = fill, thicc = thicc, tether = tether,
     };
 
-    private void Show(string name)
-    {
-        if (Controller.TryGetElementByName(name, out var e)) e.Enabled = true;
-    }
+    private void Show(string name) => _shown.Add(name);
 
     private void HideAll()
     {
