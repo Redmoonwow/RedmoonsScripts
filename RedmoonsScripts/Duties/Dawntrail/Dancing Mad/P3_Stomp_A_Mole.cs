@@ -31,12 +31,13 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   1 回目の頭割り (47875) が着弾 → 役割を入れ替えて 2 回目 (2 回目のマーカーは反対のロールに付く)
 ///   2 回目の頭割りが着弾 → 終わり (何も出さない)
 /// 役割が終わる時:
-///   中央 = 1 回目は塔の 2 組目がダメージを受けた時 (v9。頭割りの着弾より後)、2 回目は頭割り (47875) の結果 (OnActionEffectApplied) が出た時
+///   中央 = 1 回目は頭割りが着弾し、かつ 2 組目で担当方向 (左右) の塔に地団駄が当たった時 (v10)、2 回目は頭割り (47875) の結果 (OnActionEffectApplied) が出た時
 ///   塔   = 自分に地団駄 (47856) の結果が出た時。当たらなかった時 (死んでいる等) はその回の 2 組目が出た時
 ///          → 先に踏まれる D1・D3 は 1 組目で、後に踏まれる D2・D4 は 2 組目で次へ
 /// 位置はケフカ本体 (DataId 19504) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
 /// DPS は南寄り (+Y 9)、タンク・ヒーラーは北寄り (-Y 9)。ロールはジョブから自動 (設定で固定もできる)。
 ///
+/// v10: 1 回目の中央 → 塔は「頭割りの着弾」かつ「2 組目で担当方向の塔にダメージ」。地団駄が当たった人の位置で左右を判定して記録にも出す。
 /// v9: 1 回目に中央の人が塔へ移るのは、頭割りの着弾ではなく塔の 2 組目がダメージを受けた時 (逆のパターンの DPS など)。
 /// v8: 塔の保険は最後の組が全員分出てから (2 組目の 1 人目の結果で中央へ行き、自分より 70ms 早かった)。
 ///     円の基準を NameID 7131 から本体の DataId 19504 に (塔の位置のモグラ 19451 も基準になっていた)。
@@ -98,7 +99,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(9, "Redmoon");
+    public override Metadata? Metadata => new(10, "Redmoon");
     #endregion
 
     #region private properties
@@ -116,6 +117,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private int _lastStompSet = -1, _lastStackSet = -1;   // 同じ技の 2 人目以降を数えないため
     private long _lastPairMs;              // 最後の組の 1 人目の結果が出た時刻
     private int _pairTargets;              // 最後の組で結果が出た人数 (2 人で組が終わり)
+    private readonly HashSet<int> _mySideHitPairs = [];   // 自分の担当方向 (左右) の塔に地団駄が当たった組
 
     // 記録 (設定画面からコピーする。dalamud.log には頼らない)
     private readonly List<string> _log = [];
@@ -180,7 +182,11 @@ internal class P3_Stomp_A_Mole : SplatoonScript
             _pairTargets++;
             var mine = BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId);
             if (mine && _myStompPair == 0) _myStompPair = _stompPairs;
-            Log($"塔の地団駄 47856 #{_stompPairs} (seq {seq} idx {targetIndex}): target {Who(result.TargetId)} recipient {Who(result.RecipientId)}{(mine ? " ← 自分" : "")}");
+            var side = TowerSide(result.TargetId);
+            var mySide = side == C.Side;
+            if (side != null && mySide) _mySideHitPairs.Add(_stompPairs);
+            Log($"塔の地団駄 47856 #{_stompPairs} (seq {seq} idx {targetIndex}): target {Who(result.TargetId)} {(side == null ? "左右不明" : side == Side.Left ? "左の塔" : "右の塔")}"
+                + $"{(side != null && mySide ? " (担当方向)" : "")}{(mine ? " ← 自分" : "")}");
         }
         else if (id == StackHit)
         {
@@ -197,6 +203,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         _lastStompSet = _lastStackSet = -1;
         _lastPairMs = 0;
         _pairTargets = 0;
+        _mySideHitPairs.Clear();
     }
 
     public override void OnUpdate()
@@ -234,8 +241,9 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (_stompStartMs == 0 || _firstMarkerOnDps == null) return;
 
         var middleFirst = _firstMarkerOnDps == dps;   // 1 回目は自分のロールが中央か
-        // 1 回目の中央は、頭割りの着弾ではなく 1 回目の塔の 2 組目がダメージを受けたら次 (塔) へ。どちらのパターンでも 2 組目は着弾より後
-        var round1Done = middleFirst ? PairDone(2) : TowerDone(1);
+        // 1 回目の中央は、頭割りが着弾し、かつ 2 組目で担当方向 (左右) の塔に地団駄が当たったら次 (自分の塔) へ。
+        // 自分が入る塔に 1 回目の最後の人がまだいる間は移らない。左右が取れなかった時の保険は 2 組目が全員分出た時
+        var round1Done = middleFirst ? _stacks >= 1 && (_mySideHitPairs.Contains(2) || PairDone(2)) : TowerDone(1);
         if (!round1Done)
         {
             var early = IsCasting(KefkaNameId, StompCast, StompEarlySeconds);
@@ -316,6 +324,31 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (_myStompPair >= first && _myStompPair <= last) return true;
         // 自分に当たらなかった時の保険は、その回の最後の組が全員分出てから (1 人目の結果で次へ行くと、2 人目の自分より 70ms 早かった)
         return PairDone(last);
+    }
+
+    // 地団駄が当たった人がどちらの塔にいたか。塔の位置はケフカ本体 (19504) の向きから、円と同じ式 (Splatoon の includeRotation) で出す。
+    // 左 (+X 10) / 右 (-X 10)。例: 向き 2.36 なら左 (107.1,107.0) 右 (92.9,93.0) で、記録の補助 (9020) の位置と合う
+    private static Side? TowerSide(ulong targetId)
+    {
+        try
+        {
+            var target = Svc.Objects.SearchById(targetId);
+            var kefka = Svc.Objects.FirstOrDefault(o => o is IBattleNpc b && b.BaseId == KefkaDataId);
+            if (target == null || kefka == null) return null;
+            var left = TowerPos(kefka.Position, kefka.Rotation, 10f);
+            var right = TowerPos(kefka.Position, kefka.Rotation, -10f);
+            var p = new System.Numerics.Vector2(target.Position.X, target.Position.Z);
+            return System.Numerics.Vector2.Distance(p, left) <= System.Numerics.Vector2.Distance(p, right) ? Side.Left : Side.Right;
+        }
+        catch (NullReferenceException) { return null; }
+    }
+
+    // Splatoon の DrawCircle: RotatePoint(x, z, -rot, (x - offX, z + offY)) と同じ
+    private static System.Numerics.Vector2 TowerPos(System.Numerics.Vector3 pos, float rot, float offX)
+    {
+        var c = MathF.Cos(rot);
+        var sn = MathF.Sin(rot);
+        return new(pos.X - offX * c, pos.Z + offX * sn);
     }
 
     // n 組目の地団駄が全員分 (2 人、または 1 人目から 0.3 秒) 出たか
