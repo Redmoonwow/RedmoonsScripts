@@ -147,6 +147,9 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         public float PotatoGazeNoCastReleaseRadius = 0.8f;
         public string PotatoNoCastOnCommands = "/Redmoon_Summoner NoCast_on";
         public string PotatoNoCastOffCommands = "/Redmoon_Summoner NoCast_off";
+        // 黒魔のときの詠唱禁止。/Redmoon_Summoner は召喚の回しの間しか無い (黒魔では「そのコマンドはありません」で空振りする)
+        public string PotatoNoCastOnCommandsBlm = "/Redmoon_BLM NoCast_on";
+        public string PotatoNoCastOffCommandsBlm = "/Redmoon_BLM NoCast_off";
         public string PotatoStopOnCommands = "/aestop on";
         public string PotatoStopOffCommands = "/aestop off";
         public bool PotatoRetarget = true;              // 停手を解いたらケフカをターゲットし直す (停手はターゲットを外すため)
@@ -487,7 +490,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(15, "Redmoon");
+    public override Metadata Metadata => new(16, "Redmoon");
 
     #endregion
 
@@ -524,6 +527,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private bool _bombFake;              // 嘘 = 動けばよい爆弾。AE は触らない
     private bool _bombReasserted;        // 爆発直前の打ち直しをしたか
     private bool _potatoNoCast;          // forPotato: 詠唱禁止の ON コマンドを打ち、まだ OFF にしていない
+    private string _potatoNoCastOff = "";   // ON を打ったときの職に合わせた OFF のコマンド (途中で職が変わっても同じ ACR に戻す)
     private bool _potatoStop;            // forPotato: 停手の ON コマンドを打ち、まだ OFF にしていない
     private bool _potatoReasserted;      // forPotato: 爆発直前の停手の打ち直しをしたか
     private int _gazeWaveNo;             // この戦闘で何回目の視線の波か (テスト波は数えない)
@@ -935,7 +939,10 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (noCast && !_potatoNoCast)
         {
             _potatoNoCast = true;
-            RunCommands($"forPotato: 詠唱禁止 ON ({(gazeNoCast ? (waveActive ? "視線" : "視線の後") : "加速度爆弾")})", C.PotatoNoCastOnCommands, Replay);
+            var blm = IsBlackMage;
+            _potatoNoCastOff = blm ? C.PotatoNoCastOffCommandsBlm : C.PotatoNoCastOffCommands;
+            RunCommands($"forPotato: 詠唱禁止 ON ({(gazeNoCast ? (waveActive ? "視線" : "視線の後") : "加速度爆弾")}{(blm ? "、黒魔" : "")})",
+                blm ? C.PotatoNoCastOnCommandsBlm : C.PotatoNoCastOnCommands, Replay);
         }
         if (stop && !_potatoStop)
         {
@@ -957,9 +964,16 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (!noCast && _potatoNoCast)
         {
             _potatoNoCast = false;
-            RunCommands("forPotato: 詠唱禁止 OFF", C.PotatoNoCastOffCommands, Replay);
+            RunCommands("forPotato: 詠唱禁止 OFF", NoCastOffCommands, Replay);
         }
     }
+
+    /// <summary>自分が黒魔か。forPotato の詠唱禁止のコマンドを職で選ぶ (召喚と黒魔で ACR のコマンドが違う)。</summary>
+    private bool IsBlackMage => BasePlayer is { } me && me.ClassJob.RowId == 25;
+
+    /// <summary>詠唱禁止を戻すコマンド。ON を打ったときの職のもの (まだ打っていなければ今の職)。</summary>
+    private string NoCastOffCommands => _potatoNoCastOff != "" ? _potatoNoCastOff
+        : IsBlackMage ? C.PotatoNoCastOffCommandsBlm : C.PotatoNoCastOffCommands;
 
     /// <summary>視線 n 回目 (1 始まり) の後に詠唱禁止を続ける秒。PotatoGazeNoCastAfter のカンマ区切り。書いていない回は 0。</summary>
     private float GazeNoCastAfter(int n)
@@ -981,7 +995,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         if (_potatoNoCast)
         {
             _potatoNoCast = false;
-            RunCommands($"forPotato: 詠唱禁止 OFF ({reason})", C.PotatoNoCastOffCommands, Replay);
+            RunCommands($"forPotato: 詠唱禁止 OFF ({reason})", NoCastOffCommands, Replay);
         }
     }
 
@@ -1461,9 +1475,12 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGui.Checkbox("停手を解いたらケフカをターゲットし直す", ref C.PotatoRetarget);
         if (!C.ForVivi)
         {
-            ImGuiEx.Text("詠唱禁止 ON / OFF のコマンド");
+            ImGuiEx.Text("詠唱禁止 ON / OFF のコマンド (黒魔以外)");
             ImGui.InputTextMultiline("##PotatoNoCastOn", ref C.PotatoNoCastOnCommands, 2000, new Vector2(400f, 40f));
             ImGui.InputTextMultiline("##PotatoNoCastOff", ref C.PotatoNoCastOffCommands, 2000, new Vector2(400f, 40f));
+            ImGuiEx.Text("詠唱禁止 ON / OFF のコマンド (黒魔)");
+            ImGui.InputTextMultiline("##PotatoNoCastOnBlm", ref C.PotatoNoCastOnCommandsBlm, 2000, new Vector2(400f, 40f));
+            ImGui.InputTextMultiline("##PotatoNoCastOffBlm", ref C.PotatoNoCastOffCommandsBlm, 2000, new Vector2(400f, 40f));
         }
         ImGuiEx.Text("停手 ON / OFF のコマンド");
         ImGui.InputTextMultiline("##PotatoStopOn", ref C.PotatoStopOnCommands, 2000, new Vector2(400f, 40f));
