@@ -37,6 +37,7 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 位置はケフカ (NameID 7131) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
 /// DPS は南寄り (+Y 9)、タンク・ヒーラーは北寄り (-Y 9)。ロールはジョブから自動 (設定で固定もできる)。
 ///
+/// v7: 記録 (表示の切り替え・マーカー・塔・頭割り・NameID 7131 の一覧) を設定画面に出し、コピーできるようにした。
 /// v6: 順番どおりに進む作りに書き直した (v5 まではレイアウトの条件を写していて、最後の頭割りの着弾を見ていなかった)。
 /// v5: 敵の詠唱を見る所の NullReferenceException を直した。
 /// v3: マーカーは 1 人にしか付かないので、ロールは「誰か 1 人」で見る。
@@ -92,7 +93,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(6, "Redmoon");
+    public override Metadata? Metadata => new(7, "Redmoon");
     #endregion
 
     #region private properties
@@ -108,6 +109,11 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private int _myStompPair;              // 自分が踏まれた組 (1〜4、0 = まだ)
     private int _stacks;                   // 頭割り (47875) の結果が出た回数
     private int _lastStompSet = -1, _lastStackSet = -1;   // 同じ技の 2 人目以降を数えないため
+
+    // 記録 (設定画面からコピーする。dalamud.log には頼らない)
+    private readonly List<string> _log = [];
+    private string _lastShownKey = "";
+    private readonly List<string> _shownNow = [];
     #endregion
 
     #region public methods
@@ -141,13 +147,18 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (castId != StompCast) return;
         OnReset();
         _stompStartMs = Environment.TickCount64;
+        Log($"地団駄 47855 の詠唱開始 (source {source:X8})");
     }
 
     // 1 回目のマーカーだけ使う (2 回目は反対のロールに付く)
     public override void OnVFXSpawn(uint target, string vfxPath)
     {
-        if (vfxPath != StackVfx || _stompStartMs == 0 || _firstMarkerOnDps != null) return;
-        if (target.GetObject() is IPlayerCharacter pc) _firstMarkerOnDps = IsDps(pc);
+        if (vfxPath != StackVfx) return;
+        var pc = target.GetObject() as IPlayerCharacter;
+        Log($"頭割りのマーカー: {Who(target)} ({(pc == null ? "?" : IsDps(pc) ? "DPS" : "サポート")})"
+            + (_stompStartMs == 0 ? " ※地団駄の詠唱の前なので使わない" : _firstMarkerOnDps != null ? " (2 回目以降)" : " → 1 回目"));
+        if (_stompStartMs == 0 || _firstMarkerOnDps != null) return;
+        if (pc != null) _firstMarkerOnDps = IsDps(pc);
     }
 
     // 技の結果が実際に出た瞬間。同じ技 (同じ組) の 2 人目以降は数えない
@@ -159,13 +170,14 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (id == StompHit)
         {
             if (seq != _lastStompSet) { _lastStompSet = seq; _stompPairs++; }
-            if (BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId) && _myStompPair == 0)
-                _myStompPair = _stompPairs;
+            var mine = BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId);
+            if (mine && _myStompPair == 0) _myStompPair = _stompPairs;
+            Log($"塔の地団駄 47856 #{_stompPairs} (seq {seq} idx {targetIndex}): target {Who(result.TargetId)} recipient {Who(result.RecipientId)}{(mine ? " ← 自分" : "")}");
         }
-        else if (id == StackHit && seq != _lastStackSet)
+        else if (id == StackHit)
         {
-            _lastStackSet = seq;
-            _stacks++;
+            if (seq != _lastStackSet) { _lastStackSet = seq; _stacks++; }
+            Log($"頭割り 47875 #{_stacks} (seq {seq} idx {targetIndex}): target {Who(result.TargetId)}");
         }
     }
 
@@ -178,6 +190,18 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     }
 
     public override void OnUpdate()
+    {
+        _shownNow.Clear();
+        UpdateCore();
+        var key = string.Join(" ", _shownNow);
+        if (key != _lastShownKey)
+        {
+            _lastShownKey = key;
+            Log($"表示: [{(key == "" ? "なし" : key)}] / 塔の組 {_stompPairs} (自分 {_myStompPair}) 頭割り {_stacks} / {KefkaList()}");
+        }
+    }
+
+    private void UpdateCore()
     {
         HideAll();
         if (BasePlayer == null) return;
@@ -231,6 +255,12 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         ImGuiEx.Text($"今の判定: {(IsDpsSide() ? "DPS (南寄り)" : "タンク・ヒーラー (北寄り)")}");
         ImGuiEx.Text($"ギミック中: {_stompStartMs != 0} / 1 回目のマーカー: {(_firstMarkerOnDps == null ? "-" : _firstMarkerOnDps.Value ? "DPS" : "サポート")}"
                      + $" / 塔の組 {_stompPairs} (自分 {_myStompPair}) / 頭割り {_stacks}");
+        ImGui.Separator();
+        if (ImGui.Button("記録をコピー")) ImGui.SetClipboardText(string.Join(Environment.NewLine, _log));
+        ImGui.SameLine();
+        if (ImGui.Button("記録を消す")) _log.Clear();
+        ImGuiEx.Text($"記録 {_log.Count} 行 (地団駄の詠唱で消さない。最大 400 行)");
+        foreach (var line in _log.TakeLast(60)) ImGuiEx.Text(line);
     }
     #endregion
 
@@ -238,6 +268,35 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /********************************************************************/
     /* private methods                                                  */
     /********************************************************************/
+    private void Log(string text)
+    {
+        var t = _stompStartMs == 0 ? "" : $"+{(Environment.TickCount64 - _stompStartMs) / 1000.0:0.00}s ";
+        _log.Add($"{DateTime.Now:HH:mm:ss.fff} {t}{text}");
+        if (_log.Count > 400) _log.RemoveAt(0);
+    }
+
+    private static string Who(ulong id)
+    {
+        var o = Svc.Objects.SearchById(id);
+        return o == null ? $"{id:X8}" : o is IPlayerCharacter pc ? $"{pc.Name}({pc.ClassJob.Value.Abbreviation})" : $"{o.Name}#{o.BaseId}";
+    }
+
+    // 表示の基準になる NameID 7131 の敵 (分身が基準になっていないか確かめる用)
+    private static string KefkaList()
+    {
+        var list = new List<string>();
+        foreach (var o in Svc.Objects)
+        {
+            try
+            {
+                if (o is IBattleNpc x && x.NameId == KefkaNameId)
+                    list.Add($"7131#{x.BaseId}({x.Position.X:0.0},{x.Position.Z:0.0} r{x.Rotation:0.00} vis{x.IsTargetable})");
+            }
+            catch (NullReferenceException) { }
+        }
+        return list.Count == 0 ? "7131 なし" : string.Join(" ", list);
+    }
+
     // その回 (1 = 1・2 組目、2 = 3・4 組目) の塔が自分の分まで終わったか
     private bool TowerDone(int round)
     {
@@ -261,6 +320,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
 
     private void Show(string name)
     {
+        _shownNow.Add(name);
         if (Controller.TryGetElementByName(name, out var e)) e.Enabled = true;
     }
 
