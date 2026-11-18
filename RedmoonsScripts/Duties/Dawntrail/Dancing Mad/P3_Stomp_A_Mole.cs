@@ -34,9 +34,11 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   中央 = その回の頭割り (47875) の結果 (OnActionEffectApplied) が出た時
 ///   塔   = 自分に地団駄 (47856) の結果が出た時。当たらなかった時 (死んでいる等) はその回の 2 組目が出た時
 ///          → 先に踏まれる D1・D3 は 1 組目で、後に踏まれる D2・D4 は 2 組目で次へ
-/// 位置はケフカ (NameID 7131) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
+/// 位置はケフカ本体 (DataId 19504) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
 /// DPS は南寄り (+Y 9)、タンク・ヒーラーは北寄り (-Y 9)。ロールはジョブから自動 (設定で固定もできる)。
 ///
+/// v8: 塔の保険は最後の組が全員分出てから (2 組目の 1 人目の結果で中央へ行き、自分より 70ms 早かった)。
+///     円の基準を NameID 7131 から本体の DataId 19504 に (塔の位置のモグラ 19451 も基準になっていた)。
 /// v7: 記録 (表示の切り替え・マーカー・塔・頭割り・NameID 7131 の一覧) を設定画面に出し、コピーできるようにした。
 /// v6: 順番どおりに進む作りに書き直した (v5 まではレイアウトの条件を写していて、最後の頭割りの着弾を見ていなかった)。
 /// v5: 敵の詠唱を見る所の NullReferenceException を直した。
@@ -74,6 +76,8 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private const uint BlizzardNameId = 6052;
     private const uint BlizzardCast = 47887;
     private const uint KefkaNameId = 7131;
+    private const uint KefkaDataId = 19504;      // 表示の基準にする本体。NameID 7131 には塔のモグラ (19451) 8 体と補助 (9020) もいる
+    private const long PairSettleMs = 300;       // 組の 1 人目の結果から、2 人目の結果まで (記録で 50〜70ms)
     private const uint StompCast = 47855;
     private const uint StompHit = 47856;    // 塔の 2 人ずつ 4 組
     private const uint StackHit = 47875;    // 頭割りの着弾
@@ -93,7 +97,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(7, "Redmoon");
+    public override Metadata? Metadata => new(8, "Redmoon");
     #endregion
 
     #region private properties
@@ -109,6 +113,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private int _myStompPair;              // 自分が踏まれた組 (1〜4、0 = まだ)
     private int _stacks;                   // 頭割り (47875) の結果が出た回数
     private int _lastStompSet = -1, _lastStackSet = -1;   // 同じ技の 2 人目以降を数えないため
+    private long _lastPairMs;              // 最後の組の 1 人目の結果が出た時刻
 
     // 記録 (設定画面からコピーする。dalamud.log には頼らない)
     private readonly List<string> _log = [];
@@ -169,7 +174,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         var seq = (int)set.Header.GlobalEffectCounter;
         if (id == StompHit)
         {
-            if (seq != _lastStompSet) { _lastStompSet = seq; _stompPairs++; }
+            if (seq != _lastStompSet) { _lastStompSet = seq; _stompPairs++; _lastPairMs = Environment.TickCount64; }
             var mine = BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId);
             if (mine && _myStompPair == 0) _myStompPair = _stompPairs;
             Log($"塔の地団駄 47856 #{_stompPairs} (seq {seq} idx {targetIndex}): target {Who(result.TargetId)} recipient {Who(result.RecipientId)}{(mine ? " ← 自分" : "")}");
@@ -187,6 +192,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         _firstMarkerOnDps = null;
         _stompPairs = _myStompPair = _stacks = 0;
         _lastStompSet = _lastStackSet = -1;
+        _lastPairMs = 0;
     }
 
     public override void OnUpdate()
@@ -289,7 +295,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         {
             try
             {
-                if (o is IBattleNpc x && x.NameId == KefkaNameId)
+                if (o is IBattleNpc x && x.NameId == KefkaNameId && x.BaseId != 9020)   // 補助 (9020) は数が多いので出さない
                     list.Add($"7131#{x.BaseId}({x.Position.X:0.0},{x.Position.Z:0.0} r{x.Rotation:0.00} vis{x.IsTargetable})");
             }
             catch (NullReferenceException) { }
@@ -303,7 +309,8 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         var first = round * 2 - 1;
         var last = round * 2;
         if (_myStompPair >= first && _myStompPair <= last) return true;
-        return _stompPairs >= last;
+        // 自分に当たらなかった時の保険は、その回の最後の組が全員分出てから (1 人目の結果で次へ行くと、2 人目の自分より 70ms 早かった)
+        return _stompPairs > last || (_stompPairs == last && Environment.TickCount64 - _lastPairMs > PairSettleMs);
     }
 
     private static Element Fixed(uint color, bool tether) => new(0)
@@ -311,10 +318,11 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         refX = 100f, refY = 100f, radius = 2f, Donut = 0.5f, color = color, Filled = true, fillIntensity = 0.5f, thicc = 5f, tether = tether,
     };
 
-    // ケフカ (NameID 7131) の向きに対する相対位置。レイアウトと同じく onlyVisible
+    // ケフカ本体 (DataId 19504) の向きに対する相対位置。
+    // レイアウトは NameID 7131 で、塔の位置のモグラ (19451) を基準にした円も出ていた (塔の円が中央あたりに見える)
     private static Element Rel(float x, float y, float radius, float donut, uint color, float thicc, float fill, bool tether) => new(1)
     {
-        refActorNPCNameID = KefkaNameId, refActorComparisonType = 6, includeRotation = true, onlyVisible = true,
+        refActorDataID = KefkaDataId, refActorComparisonType = 3, includeRotation = true,
         offX = x, offY = y, radius = radius, Donut = donut, color = color, Filled = true, fillIntensity = fill, thicc = thicc, tether = tether,
     };
 
