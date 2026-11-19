@@ -21,7 +21,7 @@ namespace RedmoonsScripts.Generic;
 internal unsafe class ScriptEventLogger :SplatoonScript
 {
     public override HashSet<uint>? ValidTerritories { get; } = null;
-    public override Metadata Metadata => new(16, "Redmoon");
+    public override Metadata Metadata => new(17, "Redmoon");
 
     private Config Conf => Controller.GetConfig<Config>();
 
@@ -74,7 +74,7 @@ internal unsafe class ScriptEventLogger :SplatoonScript
         var kind = o is IPlayerCharacter ? "P" : o is IBattleNpc ? "N" : "O";
         if (BasePlayer?.EntityId == key) kind += "*";
         var name = o.Name.ToString().Replace(' ', '_');
-        if (o is IPlayerCharacter pc) name += "/" + pc.ClassJob.Value.Abbreviation;
+        if (o is IPlayerCharacter pc) name += "/" + pc.ClassJob.Value.Abbreviation.ToString();
         var def = $"{key:X} {o.BaseId} {kind} {name} @{o.Position.X:0.#},{o.Position.Z:0.#},{o.Rotation:0.##}";
         W.Post(w => w.Define(key, def));
         return key;
