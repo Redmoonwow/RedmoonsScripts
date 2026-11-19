@@ -30,13 +30,15 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 ///   塔の地団駄 (47856) は 2 人ずつ 4 組、約 1.3 秒おき。1・2 組目が 1 回目の塔、3・4 組目が 2 回目の塔
 ///   1 回目の頭割り (47875) が着弾 → 役割を入れ替えて 2 回目 (2 回目のマーカーは反対のロールに付く)
 ///   2 回目の頭割りが着弾 → 終わり (何も出さない)
-/// 役割が終わる時:
-///   中央 = 1 回目は頭割りが着弾し、かつ塔に 4 人 (2 組) 当たった時、2 回目は頭割り (47875) の結果 (OnActionEffectApplied) が出た時
-///   塔   = 自分に地団駄 (47856) の結果が出た時。当たらなかった時 (死んでいる等) はその回の人数 (4 人 / 8 人) に届いた時。組 = 当たった人数 / 2
+/// 役割が終わる時 (どれも技の発表 = OnActionEffectEvent で数える。1 組 = 発表 1 回、対象は 0〜2 人):
+///   中央 = 1 回目は頭割りの発表と塔の 2 組目の発表が両方来た時、2 回目は頭割り (47875) の発表が来た時
+///   塔   = 自分が対象に入った組の発表が来た時。入らなかった時 (死んでいる等) はその回の最後の組 (2 組目 / 4 組目) の発表が来た時
 ///          → 先に踏まれる D1・D3 は 1 組目で、後に踏まれる D2・D4 は 2 組目で次へ
 /// 位置はケフカ本体 (DataId 19504) の向きに対する相対。Left = ケフカの顔を見て左 (+X)。
 /// DPS は南寄り (+Y 9)、タンク・ヒーラーは北寄り (-Y 9)。ロールはジョブから自動 (設定で固定もできる)。
 ///
+/// v13: 結果 (OnActionEffectApplied) ではなく発表 (OnActionEffectEvent) で数える。結果は発表より塔で 0.19〜0.27 秒、頭割りで 0.45〜0.64 秒遅く、
+///      その分だけ切り替えが遅れていた (2026-11-19 のリプレイ)。組は発表の回数そのままなので、1 人だけの組の立て直し (間隔 0.6 秒) は要らなくなった。
 /// v12: 通常の流れはイベントだけ (人数 / 2)。組が 1 人だけ (死んでいる等) の時だけ、間隔 0.6 秒で 1 人分足して立て直す。
 /// v11: 塔は当たった人数で数える (組 = 人数 / 2)。v10 の左右の判定はやめた。
 /// v10: 1 回目の中央 → 塔は「頭割りの着弾」かつ「2 組目で担当方向の塔にダメージ」。地団駄が当たった人の位置で左右を判定して記録にも出す。
@@ -87,7 +89,6 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private const float StompEarlySeconds = 4f;
     private const string StackVfx = "vfx/lockon/eff/com_share3t.avfx";
     private const long MechanicMaxMs = 25000;   // 地団駄の詠唱からこれを過ぎたら終わり扱い (保険)
-    private const long PairGapMs = 600;          // 異常の立て直し用。組の 2 人の結果は 50〜90ms 差、組と組は 1.3 秒おき
     private const long BlizzardGapMs = 3000;    // ブリザガの詠唱が終わってから 1 回目のマーカーまで [A][B] を残す
 
     // 色・太さ・塗りはレイアウトの値
@@ -101,7 +102,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories => [1363];
-    public override Metadata? Metadata => new(12, "Redmoon");
+    public override Metadata? Metadata => new(13, "Redmoon");
     #endregion
 
     #region private properties
@@ -113,11 +114,9 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     private long _stompStartMs;            // 地団駄 (47855) の詠唱が始まった時刻 (0 = ギミックの外)
     private long _blizzardSeenMs;          // ブリザガの詠唱を最後に見た時刻
     private bool? _firstMarkerOnDps;       // 1 回目のマーカーが DPS に付いたか (null = まだ)
-    private int _stompHits;                // 塔の地団駄 (47856) の結果が出た人数。組 = 人数 / 2
-    private int _myStompPair;              // 自分が踏まれた組 (1〜4、0 = まだ)
-    private int _stacks;                   // 頭割り (47875) の結果が出た回数
-    private int _lastStackSet = -1;        // 頭割りの 2 人目以降を数えないため
-    private long _lastStompHitMs;          // 最後に塔の地団駄の結果が出た時刻 (異常の立て直しだけに使う)
+    private int _stompPairs;               // 塔の地団駄 (47856) の発表が来た回数 = 組
+    private int _myStompPair;              // 自分が対象に入った組 (1〜4、0 = まだ)
+    private int _stacks;                   // 頭割り (47875) の発表が来た回数
 
     // 記録 (設定画面からコピーする。dalamud.log には頼らない)
     private readonly List<string> _log = [];
@@ -170,27 +169,30 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (pc != null) _firstMarkerOnDps = IsDps(pc);
     }
 
-    // 技の結果が実際に出た瞬間。同じ技 (同じ組) の 2 人目以降は数えない
-    public override void OnActionEffectApplied(ActionEffectSet set, int targetIndex, ActionEffectResult result)
+    // 技の発表 (ActionEffect)。当たりはここで決まっている。結果 (HP が減る) はこの 0.2〜0.6 秒後
+    public override void OnActionEffectEvent(ActionEffectSet set)
     {
         if (_stompStartMs == 0) return;
         var id = set.Header.ActionID;
-        var seq = (int)set.Header.GlobalEffectCounter;
+        if (id != StompHit && id != StackHit) return;
+        var me = BasePlayer?.EntityId ?? 0;
+        var mine = false;
+        var who = new List<string>();
+        foreach (var t in set.TargetEffects)
+        {
+            if (me != 0 && (uint)t.TargetID == me) mine = true;
+            who.Add(Who(t.TargetID));
+        }
         if (id == StompHit)
         {
-            var now = Environment.TickCount64;
-            // 異常: 人数が奇数のまま次の組が来た = 前の組は 1 人だけ (死んでいる等)。1 人分足して組を合わせる
-            if (_stompHits % 2 == 1 && now - _lastStompHitMs > PairGapMs) FixSinglePair("次の組が来た");
-            _stompHits++;
-            _lastStompHitMs = now;
-            var mine = BasePlayer != null && (result.TargetId == BasePlayer.EntityId || result.RecipientId == BasePlayer.EntityId);
-            if (mine && _myStompPair == 0) _myStompPair = (_stompHits + 1) / 2;
-            Log($"塔の地団駄 47856 {_stompHits} 人目 (組 {(_stompHits + 1) / 2}): target {Who(result.TargetId)}{(mine ? " ← 自分" : "")}");
+            _stompPairs++;
+            if (mine && _myStompPair == 0) _myStompPair = _stompPairs;
+            Log($"塔の地団駄 47856 組 {_stompPairs}: {string.Join(", ", who)}{(mine ? " ← 自分" : "")}");
         }
-        else if (id == StackHit)
+        else
         {
-            if (seq != _lastStackSet) { _lastStackSet = seq; _stacks++; }
-            Log($"頭割り 47875 #{_stacks} (seq {seq} idx {targetIndex}): target {Who(result.TargetId)}");
+            _stacks++;
+            Log($"頭割り 47875 #{_stacks}: {string.Join(", ", who)}");
         }
     }
 
@@ -198,9 +200,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
     {
         _stompStartMs = 0;
         _firstMarkerOnDps = null;
-        _stompHits = _myStompPair = _stacks = 0;
-        _lastStackSet = -1;
-        _lastStompHitMs = 0;
+        _stompPairs = _myStompPair = _stacks = 0;
     }
 
     public override void OnUpdate()
@@ -211,7 +211,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (key != _lastShownKey)
         {
             _lastShownKey = key;
-            Log($"表示: [{(key == "" ? "なし" : key)}] / 塔 {_stompHits} 人 (自分の組 {_myStompPair}) 頭割り {_stacks} / {KefkaList()}");
+            Log($"表示: [{(key == "" ? "なし" : key)}] / 塔 {_stompPairs} 組 (自分の組 {_myStompPair}) 頭割り {_stacks} / {KefkaList()}");
         }
     }
 
@@ -221,8 +221,6 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (BasePlayer == null) return;
         var now = Environment.TickCount64;
         if (_stompStartMs != 0 && now - _stompStartMs > MechanicMaxMs) OnReset();
-        // 異常: 人数が奇数のまま 0.6 秒 = 最後の組が 1 人だけ (次の組が来ないので時間で直す)
-        if (_stompHits % 2 == 1 && now - _lastStompHitMs > PairGapMs) FixSinglePair("0.6 秒経過");
 
         var dps = IsDpsSide();
         var r = dps ? "D" : "S";
@@ -240,8 +238,8 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         if (_stompStartMs == 0 || _firstMarkerOnDps == null) return;
 
         var middleFirst = _firstMarkerOnDps == dps;   // 1 回目は自分のロールが中央か
-        // 1 回目の中央は、頭割りが着弾し、かつ塔に 4 人 (2 組) 当たったら次 (自分の塔) へ
-        var round1Done = middleFirst ? _stacks >= 1 && _stompHits >= 4 : TowerDone(1);
+        // 1 回目の中央は、頭割りと塔の 2 組目の発表が両方来たら次 (自分の塔) へ
+        var round1Done = middleFirst ? _stacks >= 1 && _stompPairs >= 2 : TowerDone(1);
         if (!round1Done)
         {
             var early = IsCasting(KefkaNameId, StompCast, StompEarlySeconds);
@@ -271,7 +269,7 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         ImGuiEx.EnumCombo("ロール (Auto = ジョブから)##role", ref C.Role);
         ImGuiEx.Text($"今の判定: {(IsDpsSide() ? "DPS (南寄り)" : "タンク・ヒーラー (北寄り)")}");
         ImGuiEx.Text($"ギミック中: {_stompStartMs != 0} / 1 回目のマーカー: {(_firstMarkerOnDps == null ? "-" : _firstMarkerOnDps.Value ? "DPS" : "サポート")}"
-                     + $" / 塔 {_stompHits} 人 (自分の組 {_myStompPair}) / 頭割り {_stacks}");
+                     + $" / 塔 {_stompPairs} 組 (自分の組 {_myStompPair}) / 頭割り {_stacks}");
         ImGui.Separator();
         if (ImGui.Button("記録をコピー")) ImGui.SetClipboardText(string.Join(Environment.NewLine, _log));
         ImGui.SameLine();
@@ -314,20 +312,14 @@ internal class P3_Stomp_A_Mole : SplatoonScript
         return list.Count == 0 ? "7131 なし" : string.Join(" ", list);
     }
 
-    private void FixSinglePair(string why)
-    {
-        _stompHits++;
-        Log($"立て直し ({why}): 組 {_stompHits / 2} は 1 人だけだったので 1 人分足した (塔 {_stompHits} 人)");
-    }
-
     // その回 (1 = 1・2 組目、2 = 3・4 組目) の塔が自分の分まで終わったか。
-    // 自分に当たらなかった時は、その回の人数 (1 回目 4 人、2 回目 8 人) に届いた時
+    // 自分が対象に入らなかった時は、その回の最後の組の発表が来た時
     private bool TowerDone(int round)
     {
         var first = round * 2 - 1;
         var last = round * 2;
         if (_myStompPair >= first && _myStompPair <= last) return true;
-        return _stompHits >= last * 2;
+        return _stompPairs >= last;
     }
 
     private static Element Fixed(uint color, bool tether) => new(0)
