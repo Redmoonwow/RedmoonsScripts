@@ -56,6 +56,8 @@ namespace RedmoonsScripts.Duties.Dawntrail.Dancing_Mad;
 /// 止める/戻すは UpdateAeStop の 1 か所で毎フレーム決める。視線の固定解除 (/aestop off) が
 /// 本物の爆弾の直前に来て、爆発の瞬間に AE が動いてしまう取り合いを防ぐため。
 /// forPotato (Redmoon ACR) は 詠唱禁止 → 停手 の 2 段。forVivi (詠唱の無いジョブ) はその停手だけ。どちらも既定 OFF。
+/// forAki (ヴァイパー + Aki ACR) も停手だけだが、秒は専用で、停手の間はゲームに積まれた技を毎フレーム消す
+/// (AE は GCD を明けの「提前使用下一个GCD时间」前にゲームの先行入力へ入れるので、停手の後でもその GCD が出て振り向く / 爆発する)。
 /// forPotato の詠唱禁止は、視線の後も回ごとに決めた秒だけ続けられる (1 回目の後は動くので詠唱を始めない)。
 ///
 /// 設定画面の Debug 欄は 5 タブ:
@@ -157,6 +159,14 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         // ---- forVivi: 詠唱の無いジョブ (詩人) 用 (既定 OFF) ----
         // forPotato の停手だけを使い、詠唱禁止のコマンドは打たない。時間は上の Potato* を共用する。forPotato より優先
         public bool ForVivi = false;
+
+        // ---- forAki: ヴァイパー + Aki ACR 用 (既定 OFF)。forVivi・forPotato より優先 ----
+        // 停手だけ (詠唱禁止は打たない)。停手 ON / OFF のコマンドとケフカのターゲットし直しは上の Potato* を共用する
+        public bool ForAki = false;
+        public float AkiGazeStopBefore = 0.6f;    // 視線: 発動の何秒前から停手 (AE の先行入力 0.3 + 振り向きが届くまで 0.3)
+        public float AkiBombStopBefore = 1.0f;    // 本物の爆弾: 爆発の何秒前から停手 (先行入力 0.3 + 硬直 0.6 + 余裕 0.1)
+        public float AkiBombAfter = 0.1f;         // 本物の爆弾: 爆発の何秒後まで
+        public bool AkiClearQueue = true;         // 停手の間、ゲームに積まれた技 (AE が先に入れた GCD) を毎フレーム消す
 
         // ---- レーダーのウィンドウ (Debug の「レーダー」で変える) ----
         public bool ShowRadar = true;                          // デバフが付いている間レーダーを出すか
@@ -490,7 +500,7 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /* public properties                                                */
     /********************************************************************/
     public override HashSet<uint>? ValidTerritories { get; } = [1363];   // Dancing Mad (Ultimate)
-    public override Metadata Metadata => new(16, "Redmoon");
+    public override Metadata Metadata => new(17, "Redmoon");
 
     #endregion
 
@@ -868,13 +878,13 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     /// </remarks>
     private void UpdateAeStop()
     {
-        if (C.ForPotato || C.ForVivi)
+        if (C.ForPotato || C.ForVivi || C.ForAki)
         {
-            ReleaseClassicStop(C.ForVivi ? "forVivi に切り替えた" : "forPotato に切り替えた");
+            ReleaseClassicStop($"{StopModeName} に切り替えた");
             UpdatePotatoStop();
             return;
         }
-        ReleasePotatoStop("forPotato / forVivi を切った");
+        ReleasePotatoStop("forPotato / forVivi / forAki を切った");
         var now = Environment.TickCount64;
         var bomb = BombWindow(now);
         var gaze = _lockStarted && !_dryRun && _gazeNeedsStop;
@@ -915,6 +925,12 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
     private void UpdatePotatoStop()
     {
         var now = Environment.TickCount64;
+        var aki = C.ForAki;
+        var noCastMode = !aki && !C.ForVivi;   // 詠唱禁止を使うのは forPotato だけ
+        var gazeStopBefore = aki ? C.AkiGazeStopBefore : C.PotatoGazeStopBefore;
+        var bombStopBefore = aki ? C.AkiBombStopBefore : C.PotatoBombStopBefore;
+        var bombAfterSec = aki ? C.AkiBombAfter : C.PotatoBombAfter;
+        var label = StopModeName;
         var waveActive = _state != State.None && !_dryRun;
         var waveEnd = _waveEndMs + (long)(C.HoldSeconds * 1000f);
         // 延ばした分は、波を終えた後 (発動 + Hold after より後) に中心へ入ったら解く
@@ -927,13 +943,13 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         var gazeAfter = _gazeNoCastUntilMs != 0 && now <= _gazeNoCastUntilMs;   // 視線の後に延ばした分 (波を終えた後も続く)
         var gazeNoCast = (waveActive && now <= waveEnd) || gazeAfter;
         var gazeStop = waveActive && _lockStarted && _gazeNeedsStop
-                       && now >= _waveEndMs - (long)(C.PotatoGazeStopBefore * 1000f) && now <= waveEnd;
+                       && now >= _waveEndMs - (long)(gazeStopBefore * 1000f) && now <= waveEnd;
         var bombReal = C.BombControl && _bombExpiryMs != 0 && !_bombFake;
-        var bombAfter = _bombExpiryMs + (long)(C.PotatoBombAfter * 1000f);
+        var bombAfter = _bombExpiryMs + (long)(bombAfterSec * 1000f);
         var bombNoCast = bombReal && C.PotatoBombNoCastBefore > 0f && now >= _bombExpiryMs - (long)(C.PotatoBombNoCastBefore * 1000f) && now <= bombAfter;
-        var bombStop = bombReal && now >= _bombExpiryMs - (long)(C.PotatoBombStopBefore * 1000f) && now <= bombAfter;
+        var bombStop = bombReal && now >= _bombExpiryMs - (long)(bombStopBefore * 1000f) && now <= bombAfter;
 
-        var noCast = !C.ForVivi && (gazeNoCast || bombNoCast);
+        var noCast = noCastMode && (gazeNoCast || bombNoCast);
         var stop = gazeStop || bombStop;
 
         if (noCast && !_potatoNoCast)
@@ -948,17 +964,18 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         {
             _potatoStop = true;
             _potatoReasserted = false;
-            RunCommands($"forPotato: 停手 ON ({(gazeStop ? "視線" : "加速度爆弾")})", C.PotatoStopOnCommands, Replay);
+            RunCommands($"{label}: 停手 ON ({(gazeStop ? "視線" : "加速度爆弾")})", C.PotatoStopOnCommands, Replay);
         }
+        if (stop && aki && C.AkiClearQueue && !Replay) ClearQueuedAction(label);
         if (bombStop && !_potatoReasserted && now >= _bombExpiryMs - BombReassertMs)
         {
             _potatoReasserted = true;
-            RunCommands("forPotato: 爆発直前の停手の打ち直し", C.PotatoStopOnCommands, Replay);
+            RunCommands($"{label}: 爆発直前の停手の打ち直し", C.PotatoStopOnCommands, Replay);
         }
         if (!stop && _potatoStop)
         {
             _potatoStop = false;
-            RunCommands("forPotato: 停手 OFF", C.PotatoStopOffCommands, Replay);
+            RunCommands($"{label}: 停手 OFF", C.PotatoStopOffCommands, Replay);
             if (C.PotatoRetarget && !Replay) RetargetKefka();
         }
         if (!noCast && _potatoNoCast)
@@ -966,6 +983,24 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
             _potatoNoCast = false;
             RunCommands("forPotato: 詠唱禁止 OFF", NoCastOffCommands, Replay);
         }
+    }
+
+    /// <summary>今の止め方の名前 (ログ用)。forAki > forVivi > forPotato の順で優先。</summary>
+    private string StopModeName => C.ForAki ? "forAki" : C.ForVivi ? "forVivi" : C.ForPotato ? "forPotato" : "通常";
+
+    /// <summary>ゲームの先行入力に積まれた技を消す (forAki の停手の間、毎フレーム)。</summary>
+    /// <remarks>
+    /// AE は GCD を明けの「提前使用下一个GCD时间」(既定 300ms) 前にゲームへ渡し、ゲームが明けた瞬間に撃つ。
+    /// 停手 (/aestop on) は AE の AI ループを止めるだけで、もう積まれた技は消えない → 停手の後でも 1 発出て、
+    /// 対象の方へ振り向く (視線) / 硬直が爆発にかかる (加速度爆弾)。積まれた印を下ろすだけ (送信済みの技は戻せない)。
+    /// </remarks>
+    private void ClearQueuedAction(string label)
+    {
+        var am = ActionManager.Instance();
+        if (am == null || !am->ActionQueued) return;
+        var id = am->QueuedActionId;
+        am->ActionQueued = false;
+        Log($"{label}: ゲームに積まれていた技 {id} を消した");
     }
 
     /// <summary>自分が黒魔か。forPotato の詠唱禁止のコマンドを職で選ぶ (召喚と黒魔で ACR のコマンドが違う)。</summary>
@@ -1451,7 +1486,28 @@ internal unsafe class P4_LockFaces : SplatoonScript<P4_LockFaces.Config>
         ImGuiEx.Tooltip("ON にすると、上の視線・爆弾のコマンドの代わりに、詠唱禁止 (Redmoon ACR の QT) → 停手 の 2 段で止める。Redmoon ACR を使わないなら OFF のまま");
         ImGui.Checkbox("forVivi (詠唱の無いジョブ用。停手だけ)", ref C.ForVivi);
         ImGuiEx.Tooltip("ON にすると forPotato の停手だけで止め、詠唱禁止のコマンドは打たない (詩人など)。時間は下の設定を共用する。forPotato より優先");
-        if (!C.ForPotato && !C.ForVivi) return;
+        ImGui.Checkbox("forAki (ヴァイパー + Aki ACR 用。停手だけ、秒は専用)", ref C.ForAki);
+        ImGuiEx.Tooltip("ON にすると停手だけで止め、停手の間はゲームに積まれた技 (AE が先に入れた GCD) を消す。forVivi・forPotato より優先。" +
+                        "停手 ON / OFF のコマンドとケフカのターゲットし直しは下の設定を共用する");
+        if (!C.ForPotato && !C.ForVivi && !C.ForAki) return;
+        if (C.ForAki)
+        {
+            ImGuiEx.Text(EColor.YellowBright, "forAki: 詠唱禁止は打たない。視線・本物の爆弾の直前だけ停手 (秒は下の forAki 用)");
+            ImGui.SetNextItemWidth(150f);
+            ImGui.SliderFloat("forAki 視線: 発動の何秒前から停手", ref C.AkiGazeStopBefore, 0f, 3f, "%.1f");
+            ImGuiEx.Tooltip("AE の先行入力 (提前使用下一个GCD时间 既定 0.3 秒) + 振り向きが届くまで。積まれた技を消すなら短くしてよい");
+            ImGui.SetNextItemWidth(150f);
+            ImGui.SliderFloat("forAki 爆弾: 爆発の何秒前から停手", ref C.AkiBombStopBefore, 0f, 5f, "%.1f");
+            ImGuiEx.Tooltip("先行入力 0.3 + 硬直 0.6 (硬直を縮めるツールがあればその値) + 余裕");
+            ImGui.SetNextItemWidth(150f);
+            ImGui.SliderFloat("forAki 爆弾: 爆発の何秒後まで", ref C.AkiBombAfter, 0f, 3f, "%.1f");
+            ImGui.Checkbox("forAki: 停手の間、ゲームに積まれた技を消す", ref C.AkiClearQueue);
+            ImGui.Checkbox("停手を解いたらケフカをターゲットし直す", ref C.PotatoRetarget);
+            ImGuiEx.Text("停手 ON / OFF のコマンド");
+            ImGui.InputTextMultiline("##PotatoStopOn", ref C.PotatoStopOnCommands, 2000, new Vector2(400f, 40f));
+            ImGui.InputTextMultiline("##PotatoStopOff", ref C.PotatoStopOffCommands, 2000, new Vector2(400f, 40f));
+            return;
+        }
         if (C.ForVivi)
             ImGuiEx.Text(EColor.YellowBright, "forVivi: 詠唱禁止は打たない。視線・本物の爆弾の直前だけ停手");
         else
